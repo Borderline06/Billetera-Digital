@@ -1,0 +1,17 @@
+# ---- Framework ----
+fastapi
+uvicorn[standard]
+
+# ---- Base de Datos (MariaDB) ----
+sqlalchemy
+pymysql
+
+# ---- Seguridad (Contraseñas y Tokens) ----
+passlib[bcrypt]
+python-jose[cryptography]
+
+# ---- Validación de Datos ----
+pydantic
+email-validator
+
+# ---- Cliente HTTP (para llamar a otros servicios) ----

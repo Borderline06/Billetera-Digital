@@ -1,0 +1,24 @@
+# monitoring/alertmanager.yml
+global:
+  resolve_timeout: 5m # Cuánto tiempo espera antes de marcar una alerta como resuelta
+
+  # Configuración para enviar correos a MailHog
+  smtp_smarthost: 'mailhog:1025' # Nombre del servicio y puerto SMTP interno
+  smtp_from: 'alertmanager@banka.local'
+  smtp_require_tls: false # MailHog no usa TLS
+
+route:
+  # Receptor por defecto para todas las alertas
+  receiver: 'email-devops'
+  
+  # Agrupa alertas con la misma etiqueta 'alertname' durante 10s
+  group_by: ['alertname']
+  group_wait: 10s
+  # Envía la misma alerta agrupada cada hora si persiste
+  repeat_interval: 1h
+
+receivers:
+- name: 'email-devops'
+  email_configs:
+  - to: 'devops@banka.local' # Dirección a la que llegarán las alertas en MailHog
+    send_resolved: true # Envía notificación cuando la alerta se resuelve

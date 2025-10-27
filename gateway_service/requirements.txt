@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+httpx # La biblioteca clave para hacer llamadas a otros servicios

@@ -1,0 +1,8 @@
+# Ignorar archivos .env
+.env
+*/.env
+
+# Ignorar carpetas de caché de Python
+__pycache__/
+*/__pycache__/
+.pytest_cache/
