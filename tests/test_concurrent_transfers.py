@@ -1,4 +1,3 @@
-# tests/test_concurrent_transfers.py
 """Prueba de concurrencia para verificar el manejo de transferencias simultáneas."""
 
 import requests
