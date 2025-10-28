@@ -188,17 +188,17 @@ def login(db: Session = Depends(get_db), form_data: OAuth2PasswordRequestForm = 
 
 
 @app.get("/verify", response_model=schemas.TokenPayload, tags=["Internal"])
-def verify(token: str = Depends()): # Query parameter 'token'
+def verify(token: str): # <-- CORREGIDO: Solo el tipo str
     """
-    Verifies the validity of a JWT token and returns its payload.
-    Intended for internal use by the API Gateway.
+    Valida un token JWT (pasado como query parameter 'token') y devuelve su payload.
+    Usado por el API Gateway.
     """
     payload = decode_token(token)
     if payload is None:
-        logger.warning("Token verification failed: Invalid or expired token.")
+        logger.warning("Intento de verificación con token inválido o expirado.")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
         )
-    # logger.debug(f"Token verified successfully for sub: {payload.get('sub')}")
+    # logger.debug(f"Token verificado correctamente para sub: {payload.get('sub')}")
     return payload

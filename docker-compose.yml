@@ -108,7 +108,7 @@ services:
       - wallet_net
     depends_on:
       cassandra1: # Espera a que el nodo semilla de Cassandra inicie
-        condition: service_started
+        condition: service_healthy
       balance_service: # Necesita el balance service para operar
         condition: service_started # Podría ser service_healthy si balance tiene healthcheck robusto
 

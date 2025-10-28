@@ -6,7 +6,7 @@ from fastapi import FastAPI, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from fastapi.responses import Response
-from prometheus_client import Counter, Histogram, generate_latest, CONTENTTYPE_LATEST
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 # Importaciones locales (absolutas)
 from db import engine, Base, get_db, SessionLocal # Importar SessionLocal para health check
@@ -94,7 +94,7 @@ async def metrics_middleware(request: Request, call_next):
 @app.get("/metrics", tags=["Monitoring"])
 def metrics():
     """Expone métricas de la aplicación para Prometheus."""
-    return Response(generate_latest(), media_type=CONTENTTYPE_LATEST)
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 @app.get("/health", tags=["Monitoring"])
 def health_check():

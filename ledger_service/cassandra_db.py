@@ -39,8 +39,8 @@ def get_cassandra_session() -> Optional[Session]:
     )
 
     attempts = 0
-    max_attempts = 10
-    wait_time = 5 # segundos
+    max_attempts = 20
+    wait_time = 10 # segundos
 
     while attempts < max_attempts:
         try:

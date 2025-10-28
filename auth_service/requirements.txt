@@ -9,3 +9,4 @@ email-validator
 python-dotenv
 httpx
 prometheus-client
+python-multipart
