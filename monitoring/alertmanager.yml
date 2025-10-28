@@ -1,24 +1,49 @@
-# monitoring/alertmanager.yml
+# Archivo de configuración principal para Alertmanager.
+# Define cómo se agrupan, inhiben y enrutan las alertas recibidas de Prometheus.
+
 global:
-  resolve_timeout: 5m # Cuánto tiempo espera antes de marcar una alerta como resuelta
+  # Tiempo que una alerta debe estar inactiva antes de considerarse resuelta.
+  resolve_timeout: 5m
 
-  # Configuración para enviar correos a MailHog
-  smtp_smarthost: 'mailhog:1025' # Nombre del servicio y puerto SMTP interno
-  smtp_from: 'alertmanager@banka.local'
-  smtp_require_tls: false # MailHog no usa TLS
+  # --- Configuración SMTP (para enviar correos a MailHog) ---
+  # Host y puerto del contenedor MailHog (nombre de servicio de Docker).
+  smtp_smarthost: 'mailhog:1025'
+  # Dirección 'De' que aparecerá en los correos de alerta.
+  smtp_from: 'alertmanager@pixlemoney.local' # Usando el nombre del proyecto
+  # MailHog no requiere TLS, así que se deshabilita.
+  smtp_require_tls: false
+  # No se necesita autenticación para MailHog (smtp_auth_username/password omitidos).
 
+# Define la ruta principal para las alertas entrantes.
 route:
-  # Receptor por defecto para todas las alertas
-  receiver: 'email-devops'
-  
-  # Agrupa alertas con la misma etiqueta 'alertname' durante 10s
-  group_by: ['alertname']
-  group_wait: 10s
-  # Envía la misma alerta agrupada cada hora si persiste
+  # Receptor por defecto si ninguna sub-ruta coincide.
+  receiver: 'notificaciones-devops'
+
+  # Agrupa alertas con las mismas etiquetas (nombre de alerta y job)
+  # para evitar múltiples notificaciones de lo mismo.
+  group_by: ['alertname', 'job']
+
+  # Tiempo de espera inicial antes de enviar una notificación para un grupo nuevo.
+  # Permite que lleguen más instancias de la misma alerta antes de notificar.
+  group_wait: 30s
+
+  # Tiempo de espera antes de enviar notificaciones para nuevas alertas del MISMO grupo
+  # una vez que ya se ha enviado la primera notificación.
+  group_interval: 5m
+
+  # Si una alerta persiste, reenvía la notificación cada hora.
   repeat_interval: 1h
 
+  # Aquí podrían definirse sub-rutas ('routes:') para dirigir alertas específicas
+  # (ej. por severidad o servicio) a diferentes receptores (ej. Slack, PagerDuty).
+
+# Define los receptores (a dónde se envían las notificaciones).
 receivers:
-- name: 'email-devops'
-  email_configs:
-  - to: 'devops@banka.local' # Dirección a la que llegarán las alertas en MailHog
-    send_resolved: true # Envía notificación cuando la alerta se resuelve
+  - name: 'notificaciones-devops' # Nombre del receptor definido en 'route'.
+    email_configs:
+      - to: 'devops@pixlemoney.local' # Dirección de correo destino (aparecerá en MailHog).
+        # Envía una notificación cuando una alerta que estaba activa se resuelve.
+        send_resolved: true
+        # Se podrían añadir más configuraciones como 'subject', 'html', etc.
+
+# Aquí podrían definirse otros receptores como 'webhook_configs' para n8n, etc.

@@ -1,4 +1,5 @@
-version: "3.9"
+# Define la infraestructura completa para la Billetera Digital Pixel Money
+# usando Docker Compose (formato v2+).
 
 services:
 
@@ -10,19 +11,18 @@ services:
     container_name: mariadb
     restart: always
     environment:
-      # --- CORREGIDO: Usar prefijo MARIADB_ ---
       MARIADB_ROOT_PASSWORD: rootpass
       MARIADB_DATABASE: wallet_db
       MARIADB_USER: wallet_user
       MARIADB_PASSWORD: walletpass
-    ports: # <-- VERIFICAR INDENTACIÓN (2 espacios)
-      - "3307:3306" # <-- VERIFICAR INDENTACIÓN (4 espacios + guión + espacio)
+    ports:
+      - "3307:3306" # Expone en localhost:3307 para evitar conflicto con 3306
     volumes:
       - mariadb_data:/var/lib/mysql
     networks:
       - wallet_net
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MARIADB_ROOT_PASSWORD}"] # <-- Healthcheck mejorado
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MARIADB_ROOT_PASSWORD}"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -32,9 +32,9 @@ services:
     container_name: cassandra1
     environment:
       - CASSANDRA_CLUSTER_NAME=WalletCluster
-      - CASSANDRA_SEEDS=cassandra1 # Correcto para el primer nodo
+      - CASSANDRA_SEEDS=cassandra1 # Nodo semilla
     ports:
-      - "9042:9042" 
+      - "9042:9042" # Puerto cliente CQL
     volumes:
       - cassandra1_data:/var/lib/cassandra
     networks:
@@ -44,13 +44,13 @@ services:
       interval: 20s
       timeout: 10s
       retries: 10
-  
+
   cassandra2:
     image: cassandra:4.1
     container_name: cassandra2
     environment:
       - CASSANDRA_CLUSTER_NAME=WalletCluster
-      - CASSANDRA_SEEDS=cassandra1 # Correcto, apunta al primer nodo
+      - CASSANDRA_SEEDS=cassandra1 # Apunta al nodo semilla
     volumes:
       - cassandra2_data:/var/lib/cassandra
     networks:
@@ -63,7 +63,7 @@ services:
     container_name: cassandra3
     environment:
       - CASSANDRA_CLUSTER_NAME=WalletCluster
-      - CASSANDRA_SEEDS=cassandra1 # Correcto, apunta al primer nodo
+      - CASSANDRA_SEEDS=cassandra1 # Apunta al nodo semilla
     volumes:
       - cassandra3_data:/var/lib/cassandra
     networks:
@@ -72,19 +72,19 @@ services:
       - cassandra1
 
   # -------------------------
-  # MICROSERVICIOS
+  # MICROSERVICIOS DE NEGOCIO
   # -------------------------
   auth_service:
     build: ./auth_service
     container_name: auth_service
     restart: always
     ports:
-      - "8001:8000" 
+      - "8001:8000" # localhost:8001 -> contenedor:8000
     networks:
       - wallet_net
     depends_on:
       mariadb:
-        condition: service_healthy
+        condition: service_healthy # Espera a que MariaDB esté saludable
 
   balance_service:
     build: ./balance_service
@@ -107,33 +107,49 @@ services:
     networks:
       - wallet_net
     depends_on:
-      cassandra1: # Podría depender del healthcheck si quisiéramos ser más estrictos
-        condition: service_started 
+      cassandra1: # Espera a que el nodo semilla de Cassandra inicie
+        condition: service_started
+      balance_service: # Necesita el balance service para operar
+        condition: service_started # Podría ser service_healthy si balance tiene healthcheck robusto
+
+  group_service:
+    build: ./group_service
+    container_name: group_service
+    restart: always
+    ports:
+      - "8004:8000"
+    networks:
+      - wallet_net
+    depends_on:
+      mariadb:
+        condition: service_healthy
+
+  interbank_service: # Nombre corregido
+    build: ./interbank_service # Ruta corregida
+    container_name: interbank_service # Nombre corregido
+    restart: always
+    ports:
+      - "8090:8000"
+    networks:
+      - wallet_net
+    # No depende de nada, es un simulador independiente
 
   gateway_service:
     build: ./gateway_service
     container_name: gateway_service
     restart: always
     ports:
-      - "8080:8080"
+      - "8080:8080" # Puerto principal de la aplicación
     networks:
       - wallet_net
-    depends_on:
+    depends_on: # Espera a que los servicios backend estén iniciados
       - auth_service
       - balance_service
       - ledger_service
-
-  mock_bankb:
-    build: ./mock_bankb
-    container_name: mock_bankb
-    restart: always
-    ports:
-      - "8090:8000"
-    networks:
-      - wallet_net
+      - group_service
 
   # -------------------------
-  # AUTOMATIZACIÓN Y MONITOREO
+  # AUTOMATIZACIÓN, MONITOREO Y ALERTAS
   # -------------------------
   n8n:
     image: n8nio/n8n:latest
@@ -143,23 +159,34 @@ services:
       - "5678:5678"
     volumes:
       - n8n_data:/home/node/.n8n
-      - ./n8n_workflows:/home/node/n8n/workflows 
+      # Monta los workflows locales dentro del contenedor (opcional)
+      - ./n8n_workflows:/home/node/n8n/workflows
     environment:
       - N8N_BASIC_AUTH_ACTIVE=true
       - N8N_BASIC_AUTH_USER=admin
-      - N8N_BASIC_AUTH_PASSWORD=admin
+      - N8N_BASIC_AUTH_PASSWORD=admin # Cambiar en producción
       - N8N_HOST=0.0.0.0
-      - WEBHOOK_URL=http://n8n:5678/ 
+      - WEBHOOK_URL=http://n8n:5678/ # URL para llamadas internas desde otros servicios
+      # Configuración SMTP para MailHog (para enviar correos de workflows)
+      - N8N_EMAIL_MODE=smtp
+      - N8N_SMTP_HOST=mailhog
+      - N8N_SMTP_PORT=1025
+      - N8N_SMTP_USER= # No necesita usuario
+      - N8N_SMTP_PASS= # No necesita contraseña
+      - N8N_SMTP_SENDER=n8n@pixlmoney.local
+      - N8N_SMTP_SSL=false
     networks:
       - wallet_net
+    depends_on:
+      - mailhog
 
   mailhog:
     image: mailhog/mailhog
     container_name: mailhog
     restart: always
     ports:
-      - "1025:1025" 
-      - "8025:8025" 
+      - "1025:1025" # Puerto SMTP
+      - "8025:8025" # Interfaz Web
     networks:
       - wallet_net
 
@@ -170,21 +197,23 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro 
-      # - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
-    command:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro # Monta las reglas
+    command: # Argumentos para Prometheus
       - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.path=/prometheus' # Directorio de almacenamiento interno
       - '--web.console.libraries=/usr/share/prometheus/console_libraries'
       - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle' # Permite recargar config con API call (útil)
     networks:
       - wallet_net
-    depends_on: 
-      - gateway_service 
+    depends_on: # Prometheus necesita que los servicios estén arriba para obtener métricas
+      - gateway_service
       - auth_service
       - balance_service
       - ledger_service
-      - mock_bankb
+      - group_service
+      - interbank_service
 
   grafana:
     image: grafana/grafana-oss:latest
@@ -194,14 +223,14 @@ services:
       - "3000:3000"
     volumes:
       - grafana_data:/var/lib/grafana
-      # - ./monitoring/grafana/provisioning:/etc/grafana/provisioning 
+      # - ./monitoring/grafana/provisioning:/etc/grafana/provisioning # Para provisión automática
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin # Cambiar en producción
     networks:
       - wallet_net
     depends_on:
-      - prometheus 
+      - prometheus # Grafana necesita que Prometheus esté listo para conectarse
 
   alertmanager:
     image: prom/alertmanager:latest
@@ -211,43 +240,50 @@ services:
       - "9093:9093"
     volumes:
       - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
-    command:
+    command: # Argumentos para Alertmanager
       - '--config.file=/etc/alertmanager/alertmanager.yml'
-      - '--storage.path=/alertmanager'
+      - '--storage.path=/alertmanager' # Directorio de almacenamiento interno
     networks:
       - wallet_net
     depends_on:
-      - mailhog 
+      - mailhog # Alertmanager necesita MailHog para enviar correos
 
   watchdog:
-    # --- IMPORTANTE: Necesitas un Dockerfile en ./monitoring ---
-    # Ejemplo simple: FROM python:3.11-slim \n WORKDIR /app \n RUN pip install docker requests \n COPY watchdog.py . \n CMD ["python", "watchdog.py"]
-    build: ./monitoring 
+    build: ./monitoring # Usa el Dockerfile dentro de monitoring/
     container_name: watchdog
     restart: always
     environment:
       - N8N_ALERT_WEBHOOK=http://n8n:5678/webhook/recovery
-      - CHECK_INTERVAL=60
+      - CHECK_INTERVAL=60 # Chequea cada 60 segundos
     volumes:
+      # Monta el socket de Docker para que el watchdog pueda controlar contenedores
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - wallet_net
-    depends_on:
+    depends_on: # Espera a que los servicios críticos y n8n estén iniciados
       - n8n
       - gateway_service
-      # No necesitas depender de auth/ledger aquí, el watchdog los revisa por nombre
+      # Podríamos añadir dependencias a otros servicios si queremos asegurar que estén
+      # al menos 'started' antes de que el watchdog empiece a monitorearlos activamente.
+      # - auth_service
+      # - balance_service
+      # - ledger_service
+      # - group_service
+      # - interbank_service
+
 
 # -------------------------
-# RED Y VOLÚMENES
+# RED Y VOLÚMENES NOMBRADOS
 # -------------------------
 networks:
   wallet_net:
-    driver: bridge
+    driver: bridge # Red interna para que los contenedores se comuniquen
 
-volumes:
+volumes: # Volúmenes para persistir datos entre reinicios
   mariadb_data:
   cassandra1_data:
   cassandra2_data:
   cassandra3_data:
   n8n_data:
   grafana_data:
+  # Prometheus y Alertmanager no necesitan volumen persistente para datos básicos en dev

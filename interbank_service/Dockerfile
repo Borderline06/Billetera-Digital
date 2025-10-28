@@ -1,4 +1,4 @@
-# Define la imagen Docker para el Ledger Service.
+# Define la imagen Docker para el Interbank Service (simulador de Happy Money).
 
 # Imagen base ligera de Python
 FROM python:3.11-slim

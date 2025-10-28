@@ -1,10 +1,24 @@
 #!/bin/bash
-# teardown.sh - Detiene y limpia el entorno completo
+# teardown.sh - Detiene y limpia completamente el entorno Docker de Pixel Money
 
-echo "Deteniendo servicios..."
-docker-compose down -v --remove-orphans
+echo "Iniciando limpieza del entorno..."
+set -e
 
-echo "Eliminando volúmenes (borrando todos los datos)..."
-docker volume prune -f
+# 1. Detener y eliminar todos los contenedores definidos en docker-compose.yml
+#    -v elimina los volúmenes anónimos asociados
+#    --remove-orphans elimina contenedores creados por builds anteriores si ya no están definidos
+echo "Deteniendo y eliminando contenedores..."
+docker compose down -v --remove-orphans
+
+# 2. Eliminar volúmenes nombrados explícitamente (¡BORRA TODOS LOS DATOS!)
+#    Esto asegura una limpieza total, incluyendo bases de datos.
+echo "Eliminando volúmenes nombrados (MariaDB, Cassandra, Grafana, n8n)..."
+# Lista los volúmenes del proyecto (asumiendo prefijo por defecto del directorio) y los elimina
+# Adaptar el filtro si usas un nombre de proyecto diferente con `docker compose -p <nombre>`
+docker volume rm $(docker volume ls -q --filter name=billetera-digital_*) 2>/dev/null || echo "No se encontraron volúmenes nombrados para eliminar o ya estaban eliminados."
+
+# 3. (Opcional) Eliminar imágenes no utilizadas
+# echo "🖼️ Eliminando imágenes Docker no utilizadas (opcional)..."
+# docker image prune -af
 
 echo "Entorno completamente limpio."

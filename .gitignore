@@ -1,8 +1,33 @@
-# Ignorar archivos .env
+# Archivos de entorno (contienen secretos)
 .env
-*/.env
+**/.env
 
-# Ignorar carpetas de caché de Python
+# Directorios de caché y artefactos de Python
 __pycache__/
 */__pycache__/
+*.pyc
+*.pyo
+*.pyd
 .pytest_cache/
+.venv/
+venv/
+env/
+
+# Archivos específicos del sistema operativo
+.DS_Store
+Thumbs.db
+
+# Artefactos de construcción de Docker (si los hubiera)
+# docker-bake.hcl
+
+# Archivos de configuración local de IDEs
+.vscode/
+.idea/
+
+# Logs (si generamos archivos de log)
+*.log
+logs/
+
+# Reportes de cobertura de pruebas
+.coverage
+htmlcov/

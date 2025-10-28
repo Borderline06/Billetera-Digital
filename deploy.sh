@@ -1,32 +1,44 @@
 #!/bin/bash
-# deploy.sh - Despliega la infraestructura completa de la Billetera Digital Bank A
+# deploy.sh - Despliega la infraestructura completa de la Billetera Digital Pixel Money
 
-echo "Despliegue iniciado para Bank Pixel Money..."
-set -e
+echo "Iniciando despliegue para Pixel Money..."
+# Detiene el script si cualquier comando falla
+set -e 
 
-# 1. Verificar Docker
+# 1. Verificar Docker y Docker Compose (v2+)
 if ! command -v docker &> /dev/null; then
-  echo "Docker no está instalado. Instálalo y vuelve a intentar."
-  exit 1
+    echo "Error: Docker no está instalado o no se encuentra en el PATH."
+    exit 1
 fi
+# Usamos 'docker compose' (v2) en lugar del antiguo 'docker-compose' (v1)
+if ! docker compose version &> /dev/null; then
+     echo "Error: Docker Compose v2 no está instalado o no funciona. Asegúrate de tener Docker Desktop actualizado."
+     exit 1
+fi
+echo "Docker y Docker Compose v2 verificados."
 
-# 2. Construir y levantar todos los servicios
-echo "Construyendo imágenes (si es necesario)..."
-docker-compose build
+# 2. Construir imágenes (si hay cambios en Dockerfile o código fuente)
+echo "Construyendo/Actualizando imágenes de los servicios..."
+docker compose build --pull # --pull intenta actualizar imágenes base como python:3.11-slim
 
-echo "Levantando servicios..."
-docker-compose up -d
+# 3. Levantar todos los servicios en segundo plano
+echo "Levantando todos los servicios (-d)..."
+docker compose up -d
 
-# 3. Verificar estado
-echo "Verificando salud de contenedores..."
-sleep 10
-docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+# 4. Mostrar estado final
+echo "Verificando estado de los contenedores..."
+# Espera breve para que los contenedores se estabilicen
+sleep 15 
+docker compose ps --format "table {{.Name}}\t{{.State}}\t{{.Status}}\t{{.Ports}}"
 
-echo "Despliegue completado exitosamente."
-echo "Accede a:"
-echo "  - MailHog (Correos): http://localhost:8025"
-echo "  - n8n Dashboard: http://localhost:5678 (user: admin, pass: admin)"
-echo "  - Prometheus: http://localhost:9090"
-echo "  - Grafana: http://localhost:3000 (user: admin, pass: admin)"
-echo "  - Alertmanager: http://localhost:9093"
-echo "  - API Gateway: http://localhost:8080 (Aún no funcional)"
+echo "Despliegue completado."
+echo "---"
+echo "Interfaces Web Disponibles:"
+echo "  - API Gateway (Swagger): http://localhost:8080/docs"
+echo "  - MailHog (Correos):    http://localhost:8025"
+echo "  - n8n Dashboard:        http://localhost:5678 (user: admin, pass: admin)"
+echo "  - Prometheus Targets:   http://localhost:9090/targets"
+echo "  - Alertmanager:         http://localhost:9093"
+echo "  - Grafana:              http://localhost:3000 (user: admin, pass: admin)"
+echo "---"
+echo "Recuerda que los servicios pueden tardar un poco en estar completamente 'healthy'."

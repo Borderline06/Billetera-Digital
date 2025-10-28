@@ -1,0 +1,5 @@
+# Dependencias de Python para el Interbank Service (simulador).
+
+fastapi
+uvicorn[standard]
+pydantic

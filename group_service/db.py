@@ -1,4 +1,4 @@
-"""Configuración de la conexión a la base de datos MariaDB usando SQLAlchemy para el Balance Service."""
+"""Configuración de la conexión a la base de datos MariaDB usando SQLAlchemy para el Group Service."""
 
 import os
 import logging
@@ -25,21 +25,21 @@ required_db_vars = {"DB_USER", "DB_PASS", "DB_HOST", "DB_NAME"}
 missing_vars = required_db_vars - set(os.environ)
 if missing_vars:
     logger.error(f"Faltan variables de entorno para la base de datos: {', '.join(missing_vars)}")
-    # Considerar lanzar excepción o salir si la conexión es crítica
+    # Considerar lanzar excepción o salir
 
-# URL de conexión para SQLAlchemy (dialecto mysql+pymysql)
 SQLALCHEMY_DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}/{DB_NAME}"
 
 # Crea el motor (Engine) de SQLAlchemy
 engine = None
 try:
     engine = create_engine(SQLALCHEMY_DATABASE_URL, pool_pre_ping=True)
-    # Intenta conectar para verificar credenciales y disponibilidad al inicio
+    # Intenta conectar para verificar credenciales al inicio
     with engine.connect() as connection:
         logger.info("Conexión a la base de datos establecida exitosamente.")
 except exc.SQLAlchemyError as e:
     logger.error(f"Error al conectar con la base de datos: {e}", exc_info=True)
     # El servicio no podrá funcionar sin la base de datos.
+    engine = None
 
 # Crea una fábrica de sesiones (SessionLocal)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine) if engine else None
@@ -62,11 +62,11 @@ def get_db():
         yield db # Proporciona la sesión a la ruta
     except exc.SQLAlchemyError as e:
         logger.error(f"Error de base de datos durante la petición: {e}", exc_info=True)
-        db.rollback() # Revierte la transacción en caso de error de BD
+        db.rollback()
         raise HTTPException(status_code=500, detail="Error interno de base de datos.")
     except Exception as e:
          logger.error(f"Error inesperado durante la petición: {e}", exc_info=True)
-         db.rollback() # Revierte también en errores generales
+         db.rollback()
          raise HTTPException(status_code=500, detail="Error interno del servidor.")
     finally:
-        db.close() # Cierra la sesión al finalizar la petición
+        db.close() # Cierra la sesión al finalizar
