@@ -5,7 +5,7 @@ import time
 import httpx
 import models
 import os
-from fastapi import FastAPI, Depends, HTTPException, status, Request
+from fastapi import FastAPI, Depends, HTTPException, status, Request, Header
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import text
@@ -127,7 +127,8 @@ def health_check():
 
 @app.post("/groups", response_model=schemas.GroupResponse, status_code=status.HTTP_201_CREATED, tags=["Groups"])
 def create_group(
-    group_in: schemas.GroupCreate, # <-- Ahora recibe el user_id aquí
+    group_in: schemas.GroupCreate,
+    x_user_id: int = Header(..., alias="X-User-ID"), # <-- Ahora recibe el user_id aquí
     db: Session = Depends(get_db)
 ):
     """
@@ -137,12 +138,12 @@ def create_group(
 
     # --- LÍNEA CORREGIDA ---
     # ¡Lee el user_id del payload (que inyectó el Gateway)!
-    leader_user_id = group_in.user_id 
+    leader_user_id = x_user_id
     # --- FIN LÍNEA CORREGIDA ---
 
     if not leader_user_id: # Doble chequeo por si acaso
          # Esto ahora es un error de validación, no de autenticación
-         raise HTTPException(status.HTTP_400_BAD_REQUEST, "user_id es requerido en el payload")
+         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Header X-User-ID es requerido")
 
     logger.info(f"Usuario {leader_user_id} creando grupo con nombre: {group_in.name}")
     # Asegúrate de que tu models.py se llame 'models' y esté importado
@@ -198,7 +199,7 @@ def create_group(
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno del servidor al crear grupo.")
 
 
-@app.post("/groups{group_id}/invite", response_model=schemas.GroupMemberResponse, status_code=status.HTTP_201_CREATED, tags=["Groups"])
+@app.post("/groups/{group_id}/invite", response_model=schemas.GroupMemberResponse, status_code=status.HTTP_201_CREATED, tags=["Groups"])
 def invite_member(group_id: int, invite_in: schemas.GroupInvite, request: Request, db: Session = Depends(get_db)):
     """
     Añade un usuario (por ID) como miembro a un grupo existente.
@@ -250,15 +251,15 @@ def invite_member(group_id: int, invite_in: schemas.GroupInvite, request: Reques
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al invitar al miembro.")
 
 
-@app.get("/groups{group_id}", response_model=schemas.GroupResponse, tags=["Groups"])
-def get_group_details(group_id: int, request: Request, db: Session = Depends(get_db)):
+@app.get("/groups/{group_id}", response_model=schemas.GroupResponse, tags=["Groups"])
+def get_group_details(group_id: int, request: Request,x_user_id: int = Header(..., alias="X-User-ID"), db: Session = Depends(get_db)):
     """
     Obtiene los detalles de un grupo específico, incluyendo la lista de miembros.
     Requiere que el solicitante sea miembro del grupo.
     """
-    requesting_user_id = getattr(request.state, "user_id", None)
+    requesting_user_id = x_user_id
     if not requesting_user_id:
-        logger.error("Error crítico: User ID no encontrado en request.state para ruta protegida /groups/{group_id}")
+        logger.error("Error crítico: User ID no encontrado en header X-User-ID")
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "User ID no autenticado")
 
     logger.debug(f"Usuario {requesting_user_id} solicitando detalles del grupo {group_id}")

@@ -10,7 +10,7 @@ from models import GroupRole
 class GroupCreate(BaseModel):
     """Schema para la solicitud de creación de un nuevo grupo (BDG)."""
     name: str = Field(..., min_length=3, max_length=100, description="Nombre del grupo.")
-    user_id: int
+    
     # El ID del líder se obtiene implícitamente del token JWT a través del Gateway.
 
 class GroupInvite(BaseModel):

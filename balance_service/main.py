@@ -3,6 +3,7 @@
 import logging
 import time
 import models
+from decimal import Decimal
 from fastapi import FastAPI, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -176,7 +177,7 @@ def credit_balance(update_in: schemas.BalanceUpdate, db: Session = Depends(get_d
             logger.warning(f"Crédito fallido: Cuenta no encontrada para user_id: {update_in.user_id}")
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"Account for user_id {update_in.user_id} not found.")
 
-        account.balance += update_in.amount
+        account.balance += float(update_in.amount)
         db.commit()
         db.refresh(account)
         logger.info(f"Crédito exitoso. Nuevo balance para user_id {update_in.user_id}: {account.balance}")
@@ -207,7 +208,7 @@ def debit_balance(update_in: schemas.BalanceUpdate, db: Session = Depends(get_db
             logger.warning(f"Débito fallido: Fondos insuficientes para user_id: {update_in.user_id} (Saldo: {account.balance}, Solicitado: {update_in.amount})")
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Insufficient funds at the time of debit.")
 
-        account.balance -= update_in.amount
+        account.balance -= float(update_in.amount)
         db.commit()
         db.refresh(account)
         logger.info(f"Débito exitoso. Nuevo balance para user_id {update_in.user_id}: {account.balance}")
@@ -288,7 +289,7 @@ def credit_group_balance(
                 logger.warning(f"Aporte fallido: Cuenta BDG no encontrada para group_id: {update_in.group_id}")
                 raise HTTPException(status.HTTP_404_NOT_FOUND, f"Cuenta de grupo (BDG) no encontrada.")
 
-            account.balance += update_in.amount
+            account.balance += Decimal(str(update_in.amount))
             db.commit() # Commit libera el bloqueo
 
         db.refresh(account)

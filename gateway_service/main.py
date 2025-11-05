@@ -181,6 +181,9 @@ async def forward_request(request: Request, target_url: str, inject_user_id: boo
         if header_value:
             headers_to_forward[header_name] = header_value
 
+    if user_id:
+        headers_to_forward["X-User-ID"] = str(user_id)
+
     try:
         if request.method in ["POST", "PUT", "PATCH"]:
             content_type = request.headers.get("content-type", "").lower()
