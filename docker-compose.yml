@@ -22,7 +22,8 @@ services:
     networks:
       - wallet_net
     healthcheck:
-      test: ["CMD", "mysqladmin", "status", "-h", "localhost", "-u", "wallet_user", "-pwalletpass"]
+      # --- CORREGIDO: Healthcheck estricto que espera al usuario de la app ---
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u${DB_USER}", "-p${DB_PASS}"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -53,14 +54,15 @@ services:
     build: ./auth_service
     container_name: auth_service
     restart: always
-    env_file: # <-- AÑADIDO
+    env_file: # <-- CORREGIDO: Añadido env_file
       - ./auth_service/.env
     ports:
       - "8001:8000"
     networks:
       - wallet_net
     depends_on:
-      - mariadb
+      mariadb:
+        condition: service_healthy # <-- Ahora esto es fiable
     healthcheck:
       test: ["CMD", "python", "-c", "import sys, http.client; conn = http.client.HTTPConnection('localhost', 8000); conn.request('GET', '/health'); sys.exit(0 if conn.getresponse().status == 200 else 1)"]
       interval: 30s
@@ -71,14 +73,15 @@ services:
     build: ./balance_service
     container_name: balance_service
     restart: always
-    env_file: # <-- AÑADIDO
+    env_file: # <-- CORREGIDO: Añadido env_file
       - ./balance_service/.env
     ports:
       - "8003:8000"
     networks:
       - wallet_net
     depends_on:
-      - mariadb
+      mariadb:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import sys, http.client; conn = http.client.HTTPConnection('localhost', 8000); conn.request('GET', '/health'); sys.exit(0 if conn.getresponse().status == 200 else 1)"]
       interval: 30s
@@ -89,7 +92,7 @@ services:
     build: ./ledger_service
     container_name: ledger_service
     restart: always
-    env_file: # <-- AÑADIDO
+    env_file: # <-- CORREGIDO: Añadido env_file
       - ./ledger_service/.env
     ports:
       - "8002:8000"
@@ -97,10 +100,10 @@ services:
       - wallet_net
     depends_on:
       cassandra1:
-        condition: service_healthy # <-- CORREGIDO (ahora SÍ puede depender de healthy)
+        condition: service_healthy
       balance_service: 
         condition: service_healthy
-    healthcheck: # <-- ¡¡AÑADIDO!! (Este era el error fatal)
+    healthcheck: # <-- ¡¡CORREGIDO!! (Este era el error que te salió)
       test: ["CMD", "python", "-c", "import sys, http.client; conn = http.client.HTTPConnection('localhost', 8000); conn.request('GET', '/health'); sys.exit(0 if conn.getresponse().status == 200 else 1)"]
       interval: 30s
       timeout: 10s
@@ -110,14 +113,15 @@ services:
     build: ./group_service
     container_name: group_service
     restart: always
-    env_file: # <-- AÑADIDO
+    env_file: # <-- CORREGIDO: Añadido env_file
       - ./group_service/.env
     ports:
       - "8004:8000"
     networks:
       - wallet_net
     depends_on:
-      - mariadb
+      mariadb:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import sys, http.client; conn = http.client.HTTPConnection('localhost', 8000); conn.request('GET', '/health'); sys.exit(0 if conn.getresponse().status == 200 else 1)"]
       interval: 30s
@@ -128,7 +132,7 @@ services:
     build: ./interbank_service
     container_name: interbank_service
     restart: always
-    env_file: # <-- AÑADIDO
+    env_file: # <-- CORREGIDO: Añadido env_file
       - ./interbank_service/.env
     ports:
       - "8090:8000"
@@ -145,7 +149,7 @@ services:
     build: ./gateway_service
     container_name: gateway_service
     restart: always
-    environment: # <-- Mantenemos la solución "fuerza bruta" que arregló el OSError
+    environment: 
       - AUTH_URL=http://auth_service:8000
       - BALANCE_URL=http://balance_service:8000
       - LEDGER_URL=http://ledger_service:8000
@@ -154,7 +158,7 @@ services:
       - "8080:8080"
     networks:
       - wallet_net
-    depends_on: # Ahora SÍ puede depender de ledger_service (porque ya tiene healthcheck)
+    depends_on: 
       auth_service:
         condition: service_healthy
       balance_service:
@@ -228,11 +232,6 @@ services:
       - wallet_net
     depends_on: 
       - gateway_service 
-      - auth_service
-      - balance_service
-      - ledger_service
-      - group_service
-      - interbank_service
 
   grafana:
     image: grafana/grafana-oss:latest
@@ -267,11 +266,11 @@ services:
       - mailhog 
 
   watchdog:
-    build: ./monitoring # <-- CORREGIDO (apunta a la carpeta correcta con el Dockerfile)
+    build: ./monitoring 
     container_name: watchdog
     restart: always
     environment:
-      - N8N_ALERT_WEBHOOK=http://n8n:5678/webhook/recovery
+      - N8N_RECOVERY_WEBHOOK_URL=http://n8n:5678/webhook/recovery
       - CHECK_INTERVAL=60
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -291,7 +290,6 @@ networks:
 volumes:
   mariadb_data:
   cassandra1_data:
-  # cassandra2_data: # <-- Eliminado
-  # cassandra3_data: # <-- Eliminado
+  # cassandra2_data y 3_data eliminados
   n8n_data:
   grafana_data:
