@@ -1,5 +1,4 @@
-# Define la infraestructura completa para la Billetera Digital Pixel Money
-# usando Docker Compose (formato v2+).
+# docker-compose.yml (Versión Final Corregida y Limpia)
 
 services:
 
@@ -11,18 +10,19 @@ services:
     container_name: mariadb
     restart: always
     environment:
-      MARIADB_ROOT_PASSWORD: rootpass
-      MARIADB_DATABASE: wallet_db
-      MARIADB_USER: wallet_user
-      MARIADB_PASSWORD: walletpass
+      # Estas variables son leídas desde el .env raíz (Billetera-Digital/.env)
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MARIADB_DATABASE: ${DB_NAME}
+      MARIADB_USER: ${DB_USER}
+      MARIADB_PASSWORD: ${DB_PASS}
     ports:
-      - "3307:3306" # Expone en localhost:3307 para evitar conflicto con 3306
+      - "3307:3306"
     volumes:
       - mariadb_data:/var/lib/mysql
     networks:
       - wallet_net
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MARIADB_ROOT_PASSWORD}"]
+      test: ["CMD", "mysqladmin", "status", "-h", "localhost", "-u", "wallet_user", "-pwalletpass"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -30,11 +30,12 @@ services:
   cassandra1:
     image: cassandra:4.1
     container_name: cassandra1
+    restart: always
     environment:
       - CASSANDRA_CLUSTER_NAME=WalletCluster
-      - CASSANDRA_SEEDS=cassandra1 # Nodo semilla
+      - CASSANDRA_SEEDS=cassandra1
     ports:
-      - "9042:9042" # Puerto cliente CQL
+      - "9042:9042" 
     volumes:
       - cassandra1_data:/var/lib/cassandra
     networks:
@@ -45,32 +46,6 @@ services:
       timeout: 10s
       retries: 10
 
-  cassandra2:
-    image: cassandra:4.1
-    container_name: cassandra2
-    environment:
-      - CASSANDRA_CLUSTER_NAME=WalletCluster
-      - CASSANDRA_SEEDS=cassandra1 # Apunta al nodo semilla
-    volumes:
-      - cassandra2_data:/var/lib/cassandra
-    networks:
-      - wallet_net
-    depends_on:
-      - cassandra1
-
-  cassandra3:
-    image: cassandra:4.1
-    container_name: cassandra3
-    environment:
-      - CASSANDRA_CLUSTER_NAME=WalletCluster
-      - CASSANDRA_SEEDS=cassandra1 # Apunta al nodo semilla
-    volumes:
-      - cassandra3_data:/var/lib/cassandra
-    networks:
-      - wallet_net
-    depends_on:
-      - cassandra1
-
   # -------------------------
   # MICROSERVICIOS DE NEGOCIO
   # -------------------------
@@ -78,78 +53,126 @@ services:
     build: ./auth_service
     container_name: auth_service
     restart: always
+    env_file: # <-- AÑADIDO
+      - ./auth_service/.env
     ports:
-      - "8001:8000" # localhost:8001 -> contenedor:8000
+      - "8001:8000"
     networks:
       - wallet_net
     depends_on:
-      mariadb:
-        condition: service_healthy # Espera a que MariaDB esté saludable
+      - mariadb
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, http.client; conn = http.client.HTTPConnection('localhost', 8000); conn.request('GET', '/health'); sys.exit(0 if conn.getresponse().status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   balance_service:
     build: ./balance_service
     container_name: balance_service
     restart: always
+    env_file: # <-- AÑADIDO
+      - ./balance_service/.env
     ports:
       - "8003:8000"
     networks:
       - wallet_net
     depends_on:
-      mariadb:
-        condition: service_healthy
+      - mariadb
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, http.client; conn = http.client.HTTPConnection('localhost', 8000); conn.request('GET', '/health'); sys.exit(0 if conn.getresponse().status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   ledger_service:
     build: ./ledger_service
     container_name: ledger_service
     restart: always
+    env_file: # <-- AÑADIDO
+      - ./ledger_service/.env
     ports:
       - "8002:8000"
     networks:
       - wallet_net
     depends_on:
-      cassandra1: # Espera a que el nodo semilla de Cassandra inicie
+      cassandra1:
+        condition: service_healthy # <-- CORREGIDO (ahora SÍ puede depender de healthy)
+      balance_service: 
         condition: service_healthy
-      balance_service: # Necesita el balance service para operar
-        condition: service_started # Podría ser service_healthy si balance tiene healthcheck robusto
+    healthcheck: # <-- ¡¡AÑADIDO!! (Este era el error fatal)
+      test: ["CMD", "python", "-c", "import sys, http.client; conn = http.client.HTTPConnection('localhost', 8000); conn.request('GET', '/health'); sys.exit(0 if conn.getresponse().status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   group_service:
     build: ./group_service
     container_name: group_service
     restart: always
+    env_file: # <-- AÑADIDO
+      - ./group_service/.env
     ports:
       - "8004:8000"
     networks:
       - wallet_net
     depends_on:
-      mariadb:
-        condition: service_healthy
+      - mariadb
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, http.client; conn = http.client.HTTPConnection('localhost', 8000); conn.request('GET', '/health'); sys.exit(0 if conn.getresponse().status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  interbank_service: # Nombre corregido
-    build: ./interbank_service # Ruta corregida
-    container_name: interbank_service # Nombre corregido
+  interbank_service:
+    build: ./interbank_service
+    container_name: interbank_service
     restart: always
+    env_file: # <-- AÑADIDO
+      - ./interbank_service/.env
     ports:
       - "8090:8000"
     networks:
       - wallet_net
-    # No depende de nada, es un simulador independiente
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, http.client; conn = http.client.HTTPConnection('localhost', 8000); conn.request('GET', '/health'); sys.exit(0 if conn.getresponse().status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
+  # --- API Gateway ---
   gateway_service:
     build: ./gateway_service
     container_name: gateway_service
     restart: always
+    environment: # <-- Mantenemos la solución "fuerza bruta" que arregló el OSError
+      - AUTH_URL=http://auth_service:8000
+      - BALANCE_URL=http://balance_service:8000
+      - LEDGER_URL=http://ledger_service:8000
+      - GROUP_URL=http://group_service:8000
     ports:
-      - "8080:8080" # Puerto principal de la aplicación
+      - "8080:8080"
     networks:
       - wallet_net
-    depends_on: # Espera a que los servicios backend estén iniciados
-      - auth_service
-      - balance_service
-      - ledger_service
-      - group_service
+    depends_on: # Ahora SÍ puede depender de ledger_service (porque ya tiene healthcheck)
+      auth_service:
+        condition: service_healthy
+      balance_service:
+        condition: service_healthy
+      ledger_service:
+        condition: service_healthy
+      group_service:
+        condition: service_healthy
+      interbank_service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, http.client; conn = http.client.HTTPConnection('localhost', 8080); conn.request('GET', '/health'); sys.exit(0 if conn.getresponse().status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # -------------------------
-  # AUTOMATIZACIÓN, MONITOREO Y ALERTAS
+  # AUTOMATIZACIÓN Y MONITOREO
   # -------------------------
   n8n:
     image: n8nio/n8n:latest
@@ -159,20 +182,16 @@ services:
       - "5678:5678"
     volumes:
       - n8n_data:/home/node/.n8n
-      # Monta los workflows locales dentro del contenedor (opcional)
-      - ./n8n_workflows:/home/node/n8n/workflows
+      - ./n8n_workflows:/home/node/n8n/workflows 
     environment:
       - N8N_BASIC_AUTH_ACTIVE=true
       - N8N_BASIC_AUTH_USER=admin
-      - N8N_BASIC_AUTH_PASSWORD=admin # Cambiar en producción
+      - N8N_BASIC_AUTH_PASSWORD=admin
       - N8N_HOST=0.0.0.0
-      - WEBHOOK_URL=http://n8n:5678/ # URL para llamadas internas desde otros servicios
-      # Configuración SMTP para MailHog (para enviar correos de workflows)
+      - WEBHOOK_URL=http://n8n:5678/ 
       - N8N_EMAIL_MODE=smtp
       - N8N_SMTP_HOST=mailhog
       - N8N_SMTP_PORT=1025
-      - N8N_SMTP_USER= # No necesita usuario
-      - N8N_SMTP_PASS= # No necesita contraseña
       - N8N_SMTP_SENDER=n8n@pixlmoney.local
       - N8N_SMTP_SSL=false
     networks:
@@ -185,8 +204,8 @@ services:
     container_name: mailhog
     restart: always
     ports:
-      - "1025:1025" # Puerto SMTP
-      - "8025:8025" # Interfaz Web
+      - "1025:1025" 
+      - "8025:8025" 
     networks:
       - wallet_net
 
@@ -197,18 +216,18 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro # Monta las reglas
-    command: # Argumentos para Prometheus
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro 
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+    command:
       - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus' # Directorio de almacenamiento interno
+      - '--storage.tsdb.path=/prometheus'
       - '--web.console.libraries=/usr/share/prometheus/console_libraries'
       - '--web.console.templates=/usr/share/prometheus/consoles'
-      - '--web.enable-lifecycle' # Permite recargar config con API call (útil)
+      - '--web.enable-lifecycle'
     networks:
       - wallet_net
-    depends_on: # Prometheus necesita que los servicios estén arriba para obtener métricas
-      - gateway_service
+    depends_on: 
+      - gateway_service 
       - auth_service
       - balance_service
       - ledger_service
@@ -223,14 +242,13 @@ services:
       - "3000:3000"
     volumes:
       - grafana_data:/var/lib/grafana
-      # - ./monitoring/grafana/provisioning:/etc/grafana/provisioning # Para provisión automática
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin # Cambiar en producción
+      - GF_SECURITY_ADMIN_PASSWORD=admin
     networks:
       - wallet_net
     depends_on:
-      - prometheus # Grafana necesita que Prometheus esté listo para conectarse
+      - prometheus 
 
   alertmanager:
     image: prom/alertmanager:latest
@@ -240,50 +258,40 @@ services:
       - "9093:9093"
     volumes:
       - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
-    command: # Argumentos para Alertmanager
+    command:
       - '--config.file=/etc/alertmanager/alertmanager.yml'
-      - '--storage.path=/alertmanager' # Directorio de almacenamiento interno
+      - '--storage.path=/alertmanager'
     networks:
       - wallet_net
     depends_on:
-      - mailhog # Alertmanager necesita MailHog para enviar correos
+      - mailhog 
 
   watchdog:
-    build: ./monitoring # Usa el Dockerfile dentro de monitoring/
+    build: ./monitoring # <-- CORREGIDO (apunta a la carpeta correcta con el Dockerfile)
     container_name: watchdog
     restart: always
     environment:
       - N8N_ALERT_WEBHOOK=http://n8n:5678/webhook/recovery
-      - CHECK_INTERVAL=60 # Chequea cada 60 segundos
+      - CHECK_INTERVAL=60
     volumes:
-      # Monta el socket de Docker para que el watchdog pueda controlar contenedores
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - wallet_net
-    depends_on: # Espera a que los servicios críticos y n8n estén iniciados
+    depends_on:
       - n8n
       - gateway_service
-      # Podríamos añadir dependencias a otros servicios si queremos asegurar que estén
-      # al menos 'started' antes de que el watchdog empiece a monitorearlos activamente.
-      # - auth_service
-      # - balance_service
-      # - ledger_service
-      # - group_service
-      # - interbank_service
-
 
 # -------------------------
 # RED Y VOLÚMENES NOMBRADOS
 # -------------------------
 networks:
   wallet_net:
-    driver: bridge # Red interna para que los contenedores se comuniquen
+    driver: bridge
 
-volumes: # Volúmenes para persistir datos entre reinicios
+volumes:
   mariadb_data:
   cassandra1_data:
-  cassandra2_data:
-  cassandra3_data:
+  # cassandra2_data: # <-- Eliminado
+  # cassandra3_data: # <-- Eliminado
   n8n_data:
   grafana_data:
-  # Prometheus y Alertmanager no necesitan volumen persistente para datos básicos en dev

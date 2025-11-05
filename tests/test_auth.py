@@ -5,7 +5,7 @@ import uuid
 import pytest # Importar pytest para mensajes de error más claros
 
 # Importar la URL base desde conftest
-from .conftest import GATEWAY_URL
+from conftest import GATEWAY_URL
 
 def test_register_duplicate_email(test_user_token):
     """
@@ -32,7 +32,7 @@ def test_login_invalid_credentials():
     cuando se proporcionan credenciales incorrectas (email no existente o contraseña errónea).
     """
     # Usamos un email aleatorio que garantizamos no existe
-    non_existent_email = f"nouser_{uuid.uuid4()}@pixlmoney.test"
+    non_existent_email = f"nouser_{uuid.uuid4()}@example.com"
     login_payload = {"username": non_existent_email, "password": "wrong_password"} # username=email para form-data
     login_url = f"{GATEWAY_URL}/auth/login"
 

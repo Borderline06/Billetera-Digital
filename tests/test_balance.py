@@ -4,7 +4,7 @@ import requests
 import pytest # Importar pytest para mensajes de error más claros
 
 # Importar la URL base y fixtures desde conftest
-from .conftest import GATEWAY_URL
+from conftest import GATEWAY_URL
 
 def test_get_initial_balance(auth_headers):
     """

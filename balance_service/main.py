@@ -2,9 +2,11 @@
 
 import logging
 import time
+import models
 from fastapi import FastAPI, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import text
 from fastapi.responses import Response
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
@@ -220,88 +222,83 @@ def debit_balance(update_in: schemas.BalanceUpdate, db: Session = Depends(get_db
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal server error during debit.")
 
 
-# --- Endpoints para Cuentas Grupales (BDG) ---
+# ... (después del endpoint /balance/debit, y antes de @app.get("/health")) ...
 
-@app.post("/group_accounts", response_model=schemas.GroupAccountResponse, status_code=status.HTTP_201_CREATED, tags=["BDG Accounts"])
-def create_group_account(account_in: schemas.GroupAccountCreate, db: Session = Depends(get_db)):
-    """Crea una nueva cuenta de saldo para un grupo (BDG). Llamado por group_service."""
+# --- ENDPOINTS DE BILLETERA GRUPAL (BDG) ---
+
+@app.post("/group_accounts", response_model=schemas.GroupAccount, status_code=status.HTTP_201_CREATED, tags=["Balance - Grupal"])
+def create_group_account(
+    account_in: schemas.GroupAccountCreate, 
+    db: Session = Depends(get_db)
+):
+    """
+    Crea una nueva cuenta de balance para un grupo (BDG).
+    Llamado por 'group_service' cuando se crea un grupo.
+    """
     logger.info(f"Solicitud para crear cuenta grupal para group_id: {account_in.group_id}")
-    new_group_account = GroupAccount(group_id=account_in.group_id, balance=0.0)
+
+    # Verificar si ya existe
+    db_account = db.query(models.GroupAccount).filter(models.GroupAccount.group_id == account_in.group_id).first()
+    if db_account:
+        logger.warning(f"Intento de crear cuenta duplicada para group_id: {account_in.group_id}")
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="La cuenta de grupo ya existe.")
 
     try:
-        db.add(new_group_account)
+        new_account = models.GroupAccount(
+            group_id=account_in.group_id,
+            balance=0.00, # Saldo inicial 0
+            version=1
+        )
+        db.add(new_account)
         db.commit()
-        db.refresh(new_group_account)
-        logger.info(f"Cuenta grupal creada exitosamente para group_id: {new_group_account.group_id}")
-        return new_group_account
+        db.refresh(new_account)
+        logger.info(f"Cuenta grupal creada exitosamente para group_id: {new_account.group_id}")
+        return new_account
     except IntegrityError:
         db.rollback()
-        logger.warning(f"Conflicto: Cuenta grupal para group_id {account_in.group_id} ya existe.")
-        raise HTTPException(status.HTTP_409_CONFLICT, f"Account for group_id {account_in.group_id} already exists.")
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="Error de integridad, la cuenta grupal puede que ya exista.")
     except Exception as e:
         db.rollback()
-        logger.error(f"Error al crear cuenta grupal para group_id {account_in.group_id}: {e}", exc_info=True)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal server error creating group account.")
+        logger.error(f"Error interno al crear cuenta grupal: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al crear cuenta de grupo.")
 
-@app.get("/group_balance/{group_id}", response_model=schemas.GroupAccountResponse, tags=["BDG Balance"])
+@app.get("/group_balance/{group_id}", response_model=schemas.GroupAccount, tags=["Balance - Grupal"])
 def get_group_balance(group_id: int, db: Session = Depends(get_db)):
-    """Obtiene los detalles y saldo de una cuenta grupal (BDG)."""
-    logger.debug(f"Solicitud de saldo para group_id: {group_id}")
-    account = db.query(GroupAccount).filter(GroupAccount.group_id == group_id).first()
+    """Obtiene el saldo de una cuenta grupal específica."""
+    account = db.query(models.GroupAccount).filter(models.GroupAccount.group_id == group_id).first()
     if not account:
-        logger.warning(f"Cuenta grupal no encontrada para group_id: {group_id}")
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Group account for group_id {group_id} not found.")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Cuenta de grupo (BDG) no encontrada para group_id: {group_id}")
     return account
 
-@app.post("/group_balance/credit", response_model=schemas.GroupAccountResponse, tags=["BDG Balance"])
-def credit_group_balance(update_in: schemas.GroupBalanceUpdate, db: Session = Depends(get_db)):
-    """Acredita (suma) fondos a una cuenta grupal (BDG) usando bloqueo pesimista."""
+@app.post("/group_balance/credit", response_model=schemas.GroupAccount, tags=["Balance - Grupal"])
+def credit_group_balance(
+    update_in: schemas.GroupBalanceUpdate, 
+    db: Session = Depends(get_db)
+):
+    """Acredita (suma) fondos a una cuenta grupal (BDG)."""
     logger.info(f"Intentando acreditar {update_in.amount} a group_id: {update_in.group_id}")
-    try:
-        db.begin()
-        account = db.query(GroupAccount).filter(GroupAccount.group_id == update_in.group_id).with_for_update().first()
-        if not account:
-            logger.warning(f"Crédito grupal fallido: Cuenta no encontrada para group_id: {update_in.group_id}")
-            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Group account {update_in.group_id} not found.")
 
-        account.balance += update_in.amount
-        db.commit()
+    try:
+        with db.begin():
+            account = db.query(models.GroupAccount).filter(
+                models.GroupAccount.group_id == update_in.group_id
+            ).with_for_update().first() # ¡Bloqueo de fila!
+
+            if not account:
+                logger.warning(f"Aporte fallido: Cuenta BDG no encontrada para group_id: {update_in.group_id}")
+                raise HTTPException(status.HTTP_404_NOT_FOUND, f"Cuenta de grupo (BDG) no encontrada.")
+
+            account.balance += update_in.amount
+            db.commit() # Commit libera el bloqueo
+
         db.refresh(account)
-        logger.info(f"Crédito grupal exitoso. Nuevo balance para group_id {update_in.group_id}: {account.balance}")
+        logger.info(f"Aporte exitoso. Nuevo balance para group_id {account.group_id}: {account.balance}")
         return account
-    except HTTPException as http_exc:
-        db.rollback()
-        raise http_exc
+
+    except HTTPException:
+         db.rollback()
+         raise # Relanza el 404
     except Exception as e:
         db.rollback()
-        logger.error(f"Error al acreditar balance grupal para group_id {update_in.group_id}: {e}", exc_info=True)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal server error during group credit.")
-
-@app.post("/group_balance/debit", response_model=schemas.GroupAccountResponse, tags=["BDG Balance"])
-def debit_group_balance(update_in: schemas.GroupBalanceUpdate, db: Session = Depends(get_db)):
-    """Debita (resta) fondos de una cuenta grupal (BDG) usando bloqueo pesimista."""
-    logger.info(f"Intentando debitar {update_in.amount} de group_id: {update_in.group_id}")
-    try:
-        db.begin()
-        account = db.query(GroupAccount).filter(GroupAccount.group_id == update_in.group_id).with_for_update().first()
-        if not account:
-            logger.warning(f"Débito grupal fallido: Cuenta no encontrada para group_id: {update_in.group_id}")
-            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Group account {update_in.group_id} not found.")
-
-        # Doble verificación de fondos DENTRO de la transacción bloqueada
-        if account.balance < update_in.amount:
-            logger.warning(f"Débito grupal fallido: Fondos insuficientes para group_id: {update_in.group_id} (Saldo: {account.balance}, Solicitado: {update_in.amount})")
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Insufficient funds in group account.")
-
-        account.balance -= update_in.amount
-        db.commit()
-        db.refresh(account)
-        logger.info(f"Débito grupal exitoso. Nuevo balance para group_id {update_in.group_id}: {account.balance}")
-        return account
-    except HTTPException as http_exc:
-        db.rollback()
-        raise http_exc
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Error al debitar balance grupal para group_id {update_in.group_id}: {e}", exc_info=True)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal server error during group debit.")
+        logger.error(f"Error interno al acreditar a grupo {update_in.group_id}: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al procesar el aporte.")

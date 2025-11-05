@@ -29,23 +29,21 @@ class AccountResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-# --- Schemas para Cuentas Grupales (BDG) ---
+# --- Esquemas de Billetera Grupal (BDG) ---
 
 class GroupAccountCreate(BaseModel):
-    """Schema para la solicitud de creación de una cuenta grupal."""
+    """Schema para crear una cuenta de grupo (solo necesita el ID)."""
     group_id: int
 
-class GroupBalanceUpdate(BaseModel):
-    """Schema para solicitar una actualización (crédito/débito) del saldo grupal."""
-    group_id: int
-    amount: float = Field(..., gt=0, description="El monto para actualizar debe ser positivo.")
-
-class GroupAccountResponse(BaseModel):
-    """Schema para la respuesta al obtener detalles de una cuenta grupal."""
-    id: int
+class GroupAccount(BaseModel):
+    """Schema para devolver la información de una cuenta de grupo."""
     group_id: int
     balance: float
-    currency: str
+    version: int
 
-    # Configuración Pydantic v2+ para mapeo desde modelos ORM
     model_config = ConfigDict(from_attributes=True)
+
+class GroupBalanceUpdate(BaseModel):
+    """Schema para acreditar/debitar una cuenta de grupo."""
+    group_id: int
+    amount: float = Field(..., gt=0, description="El monto debe ser positivo.")

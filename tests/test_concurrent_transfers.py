@@ -2,12 +2,13 @@
 
 import requests
 import pytest
+import time
 import uuid
 import threading # Para lanzar peticiones simultáneas
 import logging
 
 # Importar la URL base y fixtures desde conftest
-from .conftest import GATEWAY_URL
+from conftest import GATEWAY_URL
 
 # Configurar logger
 logger = logging.getLogger(__name__)

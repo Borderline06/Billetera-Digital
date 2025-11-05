@@ -4,10 +4,11 @@ import os
 import httpx
 import logging
 import time
-from fastapi import FastAPI, Request, HTTPException, status
+from fastapi import FastAPI, Request, HTTPException, status, Header, Depends
 from fastapi.responses import JSONResponse, Response
 from dotenv import load_dotenv
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from typing import Optional # Importar Optional
 
 # Carga variables de entorno
 load_dotenv()
@@ -27,8 +28,9 @@ required_urls = {"AUTH_URL", "BALANCE_URL", "LEDGER_URL", "GROUP_URL"}
 missing_urls = required_urls - set(os.environ)
 if missing_urls:
     logger.critical(f"Faltan URLs de servicios internos en .env: {', '.join(missing_urls)}")
-    # El gateway no puede funcionar sin estas URLs. Podríamos salir.
-    # exit(1)
+    # El gateway no puede funcionar sin estas URLs.
+    # Lanzamos una excepción para detener el arranque.
+    raise EnvironmentError(f"Faltan URLs de servicios internos: {', '.join(missing_urls)}")
 
 # Inicializa FastAPI
 app = FastAPI(
@@ -48,8 +50,7 @@ PUBLIC_ROUTES = [
 ]
 
 # --- Cliente HTTP Asíncrono Reutilizable ---
-# Usar un cliente persistente mejora el rendimiento
-client = httpx.AsyncClient(timeout=15.0) # Timeout general para llamadas internas
+client = httpx.AsyncClient(timeout=15.0)
 
 # --- Métricas Prometheus ---
 REQUEST_COUNT = Counter(
@@ -70,13 +71,13 @@ async def combined_middleware(request: Request, call_next):
     """Middleware combinado para métricas y seguridad."""
     start_time = time.time()
     response = None
-    status_code = 500 # Default
-    user_id = None # Para métricas/logs si es relevante
+    status_code = 500
+    user_id = None
 
-    endpoint = request.url.path # Guardamos antes de posibles errores
+    endpoint = request.url.path
 
     try:
-        # --- Lógica de Seguridad (adaptada del middleware original) ---
+        # --- Lógica de Seguridad (Autenticación) ---
         request.state.user_id = None # Inicializar
         is_public = any(request.url.path.startswith(p) for p in PUBLIC_ROUTES)
 
@@ -104,9 +105,9 @@ async def combined_middleware(request: Request, call_next):
 
             except httpx.RequestError:
                  raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Servicio de autenticación no disponible")
-            except ValueError: # Error al convertir user_id_str a int
+            except ValueError:
                  raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Payload del token inválido ('sub' no es un ID válido)")
-            except Exception as auth_exc: # Captura otros errores de validación
+            except Exception as auth_exc:
                  logger.error(f"Error inesperado en validación de token: {auth_exc}", exc_info=True)
                  raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Error en validación de token")
 
@@ -115,21 +116,19 @@ async def combined_middleware(request: Request, call_next):
         status_code = response.status_code
 
     except HTTPException as http_exc:
-        # Captura errores HTTP lanzados por el middleware de seguridad o el endpoint
+        # Captura errores HTTP lanzados por el middleware o el endpoint
         status_code = http_exc.status_code
         response = JSONResponse(status_code=status_code, content={"detail": http_exc.detail})
-        # No relanzamos, devolvemos la respuesta JSON directamente
+    
     except Exception as exc:
         # Captura excepciones no controladas
         logger.error(f"Middleware error inesperado en {endpoint}: {exc}", exc_info=True)
-        response = Response("Internal Server Error", status_code=500)
+        response = JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
         status_code = 500
     finally:
         # --- Lógica de Métricas ---
         latency = time.time() - start_time
-        # Normalizar endpoint si es necesario (ej. quitar IDs)
-        # ... (lógica de normalización si se añade) ...
-        final_status_code = getattr(response, 'status_code', status_code) # Usamos getattr por si response es None
+        final_status_code = getattr(response, 'status_code', status_code)
         REQUEST_LATENCY.labels(endpoint=endpoint).observe(latency)
         REQUEST_COUNT.labels(
             method=request.method,
@@ -137,12 +136,25 @@ async def combined_middleware(request: Request, call_next):
             status_code=final_status_code
         ).inc()
 
-    # Aseguramos devolver una respuesta, incluso si es la de error creada aquí
-    if response is None:
-        logger.error(f"Middleware finalizó sin respuesta para {endpoint}")
-        response = Response("Internal Server Error", status_code=500)
+    if response is None: # Aseguramos que siempre haya una respuesta
+         response = JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
     return response
+
+
+# --- Dependencia de Seguridad ---
+
+async def get_current_user_id(request: Request) -> int:
+    """
+    Dependencia de FastAPI que extrae el user_id verificado por el middleware.
+    Se usa en todos los endpoints protegidos.
+    """
+    user_id = getattr(request.state, "user_id", None)
+    if user_id is None:
+        # Esto no debería pasar si el middleware funciona, pero es una doble verificación.
+        logger.error(f"Error crítico: get_current_user_id llamado en una ruta sin user_id autenticado ({request.url.path})")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "User ID no disponible")
+    return user_id
 
 
 # --- Endpoints de Salud y Métricas ---
@@ -161,37 +173,53 @@ async def forward_request(request: Request, target_url: str, inject_user_id: boo
     """Función genérica para reenviar peticiones a servicios internos."""
     user_id = getattr(request.state, "user_id", None)
     
-    # Prepara payload y headers para reenviar
     payload = None
     headers_to_forward = {}
 
-    # Reenvía cabeceras específicas si se indican
     for header_name in pass_headers:
         header_value = request.headers.get(header_name)
         if header_value:
             headers_to_forward[header_name] = header_value
 
-    # Lee el cuerpo según el método
-    if request.method in ["POST", "PUT", "PATCH"]:
-        content_type = request.headers.get("content-type", "").lower()
-        if "application/json" in content_type:
-            payload = await request.json()
-            if inject_user_id:
-                if not user_id:
-                    logger.error(f"Intento de inyectar user_id NULO en {target_url}")
-                    raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno: user_id no disponible")
-                payload['user_id'] = user_id # Inyecta user_id validado
-            response = await client.request(request.method, target_url, json=payload, headers=headers_to_forward)
-        elif "application/x-www-form-urlencoded" in content_type:
-            form_data = await request.form()
-            response = await client.request(request.method, target_url, data=form_data, headers=headers_to_forward)
-        else: # Otros tipos de contenido no soportados directamente
-             response = await client.request(request.method, target_url, content=await request.body(), headers=headers_to_forward)
-    else: # GET, DELETE, etc.
-        response = await client.request(request.method, target_url, headers=headers_to_forward)
+    try:
+        if request.method in ["POST", "PUT", "PATCH"]:
+            content_type = request.headers.get("content-type", "").lower()
+            
+            if "application/json" in content_type:
+                payload = await request.json()
+                if inject_user_id:
+                    if not user_id:
+                        logger.error(f"Intento de inyectar user_id NULO en {target_url}")
+                        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno: user_id no disponible")
+                    payload['user_id'] = user_id
+                response = await client.request(request.method, target_url, json=payload, headers=headers_to_forward)
+            
+            elif "application/x-www-form-urlencoded" in content_type:
+                form_data = await request.form()
+                response = await client.request(request.method, target_url, data=form_data, headers=headers_to_forward)
+            
+            else: 
+                response = await client.request(request.method, target_url, content=await request.body(), headers=headers_to_forward)
+        else: # GET, DELETE, etc.
+            response = await client.request(request.method, target_url, headers=headers_to_forward)
 
-    # Devuelve la respuesta del servicio interno al cliente original
-    return JSONResponse(status_code=response.status_code, content=response.json())
+        # Reenviar la respuesta (JSON o texto)
+        try:
+            response_json = response.json()
+            return JSONResponse(status_code=response.status_code, content=response_json)
+        except json.JSONDecodeError:
+            return Response(status_code=response.status_code, content=response.text)
+
+    except httpx.ConnectError as e:
+        logger.error(f"Error de conexión al reenviar a {target_url}: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Servicio interno no disponible: {target_url}")
+    except httpx.HTTPStatusError as e:
+        # Propaga el error del servicio interno
+        logger.warning(f"Servicio interno {target_url} devolvió error {e.response.status_code}: {e.response.text}")
+        return Response(status_code=e.response.status_code, content=e.response.content)
+    except Exception as e:
+        logger.error(f"Error inesperado al reenviar a {target_url}: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno del Gateway")
 
 
 # --- Endpoints Públicos (Proxy para Auth) ---
@@ -211,57 +239,68 @@ async def proxy_login(request: Request):
 # --- Endpoints Privados (Proxy para Balance) ---
 
 @app.get("/balance/me", tags=["Balance"])
-async def proxy_get_my_balance(request: Request):
+async def proxy_get_my_balance(request: Request, user_id: int = Depends(get_current_user_id)):
     """Obtiene el saldo del usuario autenticado."""
-    # El middleware ya validó el token y puso user_id en request.state
-    user_id = getattr(request.state, "user_id", None)
-    if not user_id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "User ID not available after authentication")
-    
     logger.info(f"Proxying request to /balance/{user_id}")
     return await forward_request(request, f"{BALANCE_URL}/balance/{user_id}")
 
 # --- Endpoints Privados (Proxy para Ledger) ---
 
 @app.post("/ledger/deposit", tags=["Ledger"])
-async def proxy_deposit(request: Request):
+async def proxy_deposit(request: Request, user_id: int = Depends(get_current_user_id)):
     """Reenvía la solicitud de depósito al servicio de ledger, inyectando user_id."""
-    logger.info("Proxying request to /ledger/deposit")
-    # Pasa 'Idempotency-Key' y reenvía 'Authorization' (opcional, por si ledger lo necesita)
+    logger.info(f"Proxying request to /ledger/deposit for user_id: {user_id}")
     return await forward_request(request, f"{LEDGER_URL}/deposit", inject_user_id=True, pass_headers=["Idempotency-Key", "Authorization"])
 
 @app.post("/ledger/transfer", tags=["Ledger"])
-async def proxy_transfer(request: Request):
+async def proxy_transfer(request: Request, user_id: int = Depends(get_current_user_id)):
     """Reenvía la solicitud de transferencia al servicio de ledger, inyectando user_id."""
-    logger.info("Proxying request to /ledger/transfer")
+    logger.info(f"Proxying request to /ledger/transfer for user_id: {user_id}")
     return await forward_request(request, f"{LEDGER_URL}/transfer", inject_user_id=True, pass_headers=["Idempotency-Key", "Authorization"])
 
 @app.post("/ledger/contribute", tags=["Ledger"])
-async def proxy_contribute(request: Request):
+async def proxy_contribute(request: Request, user_id: int = Depends(get_current_user_id)):
     """Reenvía la solicitud de aporte a grupo al servicio de ledger, inyectando user_id."""
-    logger.info("Proxying request to /ledger/contribute")
+    logger.info(f"Proxying request to /ledger/contribute for user_id: {user_id}")
     return await forward_request(request, f"{LEDGER_URL}/contribute", inject_user_id=True, pass_headers=["Idempotency-Key", "Authorization"])
 
 # --- Endpoints Privados (Proxy para Group) ---
 
-@app.post("/groups", tags=["Groups"])
-async def proxy_create_group(request: Request):
-    """Reenvía la solicitud de creación de grupo al servicio de grupos."""
-    logger.info("Proxying request to /groups")
-    # Pasa la cabecera Authorization por si group_service la necesita
-    return await forward_request(request, f"{GROUP_URL}/groups", inject_user_id=False, pass_headers=["Authorization"])
+@app.post("/groups", status_code=status.HTTP_201_CREATED, tags=["Groups"])
+async def proxy_create_group(request: Request, user_id: int = Depends(get_current_user_id)):
+    """
+    Reenvía la solicitud de creación de grupo al servicio de grupos,
+    inyectando el user_id del token verificado.
+    """
+    logger.info(f"Proxying request to /groups for user_id: {user_id}")
+    return await forward_request(
+        request, 
+        f"{GROUP_URL}/groups", 
+        inject_user_id=True, # ¡Inyecta el user_id!
+        pass_headers=["Authorization"]
+    )
 
 @app.post("/groups/{group_id}/invite", tags=["Groups"])
-async def proxy_invite_member(group_id: int, request: Request):
+async def proxy_invite_member(group_id: int, request: Request, user_id: int = Depends(get_current_user_id)):
     """Reenvía la solicitud de invitación de miembro al servicio de grupos."""
-    logger.info(f"Proxying request to /groups/{group_id}/invite")
-    return await forward_request(request, f"{GROUP_URL}/groups/{group_id}/invite", inject_user_id=False, pass_headers=["Authorization"])
+    logger.info(f"Proxying request to /groups/{group_id}/invite for user_id: {user_id}")
+    return await forward_request(
+        request, 
+        f"{GROUP_URL}/groups/{group_id}/invite", 
+        inject_user_id=True, # El group_service necesita saber QUIÉN invita
+        pass_headers=["Authorization"]
+    )
 
 @app.get("/groups/{group_id}", tags=["Groups"])
-async def proxy_get_group(group_id: int, request: Request):
+async def proxy_get_group(group_id: int, request: Request, user_id: int = Depends(get_current_user_id)):
     """Reenvía la solicitud para obtener detalles de un grupo."""
-    logger.info(f"Proxying request to /groups/{group_id}")
-    return await forward_request(request, f"{GROUP_URL}/groups/{group_id}", inject_user_id=False, pass_headers=["Authorization"])
+    logger.info(f"Proxying request to /groups/{group_id} for user_id: {user_id}")
+    return await forward_request(
+        request, 
+        f"{GROUP_URL}/groups/{group_id}", 
+        inject_user_id=True, # El group_service necesita saber si el usuario es miembro
+        pass_headers=["Authorization"]
+    )
 
 # --- Manejador de Cierre ---
 @app.on_event("shutdown")

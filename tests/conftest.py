@@ -6,13 +6,13 @@ Define la URL base del Gateway y crea un usuario de prueba con token al inicio d
 import pytest
 import requests
 import uuid
-import jwt # Necesario para decodificar el token y obtener user_id
+from jose import jwt # Necesario para decodificar el token (usa python-jose)
 import os # Para leer JWT_SECRET_KEY del entorno (o default)
 from dotenv import load_dotenv
 
 # Cargar variables de entorno (para JWT_SECRET_KEY)
 # Asume que hay un .env en la raíz del proyecto o que la variable está en el entorno
-load_dotenv()
+load_dotenv(dotenv_path='./auth_service/.env')
 
 # URL base del API Gateway
 GATEWAY_URL = "http://localhost:8080"
@@ -30,7 +30,7 @@ def test_user_token():
     4. Devuelve un diccionario con email, user_id y token.
     """
     session_uuid = uuid.uuid4()
-    test_email = f"testuser_{session_uuid}@pixlmoney.test"
+    test_email = f"testuser_{session_uuid}@example.com"
     test_password = "password123"
     user_id = None
     token = None
@@ -85,7 +85,7 @@ def test_user_token():
     return {"email": test_email, "user_id": user_id, "token": token}
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def auth_headers(test_user_token):
     """Fixture simple para obtener las cabeceras de autorización Bearer."""
     return {"Authorization": f"Bearer {test_user_token['token']}"}

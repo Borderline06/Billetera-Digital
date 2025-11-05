@@ -1,6 +1,6 @@
 """Define los modelos de las tablas 'accounts' y 'group_accounts' usando SQLAlchemy ORM."""
 
-from sqlalchemy import Column, Integer, String, Float
+from sqlalchemy import Column, Integer, String, Float, UniqueConstraint, func, Numeric
 # Importación absoluta desde el módulo db.py del mismo directorio
 from db import Base
 
@@ -27,21 +27,17 @@ class Account(Base):
 
 
 class GroupAccount(Base):
-    """
-    Modelo SQLAlchemy que representa la tabla 'group_accounts'.
-    Almacena el saldo de las billeteras digitales grupales (BDG).
-    """
+    """Modelo de la cuenta de una Billetera Grupal (BDG)."""
     __tablename__ = "group_accounts"
 
-    # Clave primaria autoincremental
-    id = Column(Integer, primary_key=True, index=True)
+    # Usamos el group_id del group_service como PK
+    group_id = Column(Integer, primary_key=True, index=True) 
 
-    # Clave foránea (lógica) al ID del grupo en el servicio de grupos.
-    # Se asegura que cada grupo tenga solo una cuenta de saldo.
-    group_id = Column(Integer, unique=True, index=True, nullable=False)
+    balance = Column(Numeric(10, 2), nullable=False, default=0.00)
 
-    # Saldo actual de la cuenta grupal.
-    balance = Column(Float, nullable=False, default=0.0)
+    # Versión para control de concurrencia (optimistic locking)
+    version = Column(Integer, nullable=False, default=1) 
 
-    # Moneda de la cuenta grupal.
-    currency = Column(String(10), nullable=False, default="USD")
+    __mapper_args__ = {
+        "version_id_col": version
+    }

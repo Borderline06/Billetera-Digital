@@ -10,7 +10,9 @@ from sqlalchemy.orm import Session
 # Importaciones locales
 from db import engine, Base, get_db
 from models import User
+import db
 import schemas
+import models
 from utils import (
     get_password_hash,
     verify_password,

@@ -2,20 +2,29 @@
 
 import logging
 import time
+import httpx
+import models
+import os
 from fastapi import FastAPI, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import text
 from fastapi.responses import Response
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+
 
 # Importaciones locales (absolutas)
 from db import engine, Base, get_db, SessionLocal # Importar SessionLocal para health check
 from models import Group, GroupMember, GroupRole
+from dotenv import load_dotenv
+load_dotenv()
 import schemas
 
 # Configura logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+BALANCE_SERVICE_URL = os.getenv("BALANCE_SERVICE_URL")
 
 # Crea tablas si no existen al iniciar
 try:
@@ -114,38 +123,72 @@ def health_check():
 
 # --- Endpoints de API para Grupos ---
 
+# Reemplaza la función create_group entera con esto:
+
 @app.post("/groups", response_model=schemas.GroupResponse, status_code=status.HTTP_201_CREATED, tags=["Groups"])
-def create_group(group_in: schemas.GroupCreate, request: Request, db: Session = Depends(get_db)):
+def create_group(
+    group_in: schemas.GroupCreate, # <-- Ahora recibe el user_id aquí
+    db: Session = Depends(get_db)
+):
     """
     Crea un nuevo grupo (BDG).
-    El usuario autenticado (obtenido del Gateway) se convierte en el líder.
+    El usuario autenticado (inyectado por el Gateway en el payload) se convierte en el líder.
     """
-    leader_user_id = getattr(request.state, "user_id", None)
-    if not leader_user_id:
-        logger.error("Error crítico: User ID no encontrado en request.state para ruta protegida /groups")
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "User ID no autenticado")
+
+    # --- LÍNEA CORREGIDA ---
+    # ¡Lee el user_id del payload (que inyectó el Gateway)!
+    leader_user_id = group_in.user_id 
+    # --- FIN LÍNEA CORREGIDA ---
+
+    if not leader_user_id: # Doble chequeo por si acaso
+         # Esto ahora es un error de validación, no de autenticación
+         raise HTTPException(status.HTTP_400_BAD_REQUEST, "user_id es requerido en el payload")
 
     logger.info(f"Usuario {leader_user_id} creando grupo con nombre: {group_in.name}")
-    new_group = Group(name=group_in.name, leader_user_id=leader_user_id)
+    # Asegúrate de que tu models.py se llame 'models' y esté importado
+    new_group = models.Group(name=group_in.name, leader_user_id=leader_user_id)
 
     try:
         db.add(new_group)
-        # Hacemos flush para obtener el ID del grupo antes de añadir al miembro
-        db.flush()
+        db.flush() # Obtenemos el ID del grupo
 
         # Añadimos al líder como el primer miembro
-        leader_member = GroupMember(
+        leader_member = models.GroupMember(
             group_id=new_group.id,
             user_id=leader_user_id,
-            role=GroupRole.LEADER
+            role=models.GroupRole.LEADER # Asumiendo que tienes 'models.GroupRole'
         )
         db.add(leader_member)
-        db.commit() # Commit final
-        db.refresh(new_group) # Carga la relación 'members'
+
+        # --- ¡BUG SUTIL ARREGLADO! ---
+        # Llamar a balance_service para crear la cuenta grupal
+        logger.info(f"Creando cuenta de balance para group_id: {new_group.id}")
+        try:
+            # ¡Esta llamada es Sincrónica! No podemos usar 'await'.
+            # Usamos httpx.Client() en lugar de AsyncClient
+            with httpx.Client() as client:
+                response = client.post(
+                    f"{BALANCE_SERVICE_URL}/group_accounts", # Endpoint de creación de cuenta grupal
+                    json={"group_id": new_group.id}
+                )
+                response.raise_for_status() # Lanza error si balance_service falla
+        except httpx.RequestError as e:
+            logger.error(f"Error al crear cuenta de balance para grupo {new_group.id}: {e}")
+            db.rollback()
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Error al contactar Balance Service al crear grupo")
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Balance Service devolvió error al crear cuenta para grupo {new_group.id}: {e.response.text}")
+            db.rollback()
+            raise HTTPException(status_code=e.response.status_code, detail=f"Balance Service: {e.response.json().get('detail', 'Error')}")
+        # --- FIN BUG SUTIL ---
+
+        db.commit() # Commit final de grupo, miembro y cuenta
+        db.refresh(new_group) 
         logger.info(f"Grupo ID {new_group.id} ('{new_group.name}') creado exitosamente por user_id: {leader_user_id}")
-        GROUP_CREATED_COUNT.inc() # Incrementa métrica
+        GROUP_CREATED_COUNT.inc()
         return new_group
-    except IntegrityError: # Podría ocurrir si hay problemas con constraints
+
+    except IntegrityError: 
         db.rollback()
         logger.warning(f"Error de integridad al crear grupo '{group_in.name}' por user {leader_user_id}.")
         raise HTTPException(status.HTTP_409_CONFLICT, "Conflicto al crear el grupo, posible duplicado o dato inválido.")
@@ -155,7 +198,7 @@ def create_group(group_in: schemas.GroupCreate, request: Request, db: Session = 
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno del servidor al crear grupo.")
 
 
-@app.post("/groups/{group_id}/invite", response_model=schemas.GroupMemberResponse, status_code=status.HTTP_201_CREATED, tags=["Groups"])
+@app.post("/groups{group_id}/invite", response_model=schemas.GroupMemberResponse, status_code=status.HTTP_201_CREATED, tags=["Groups"])
 def invite_member(group_id: int, invite_in: schemas.GroupInvite, request: Request, db: Session = Depends(get_db)):
     """
     Añade un usuario (por ID) como miembro a un grupo existente.
@@ -207,7 +250,7 @@ def invite_member(group_id: int, invite_in: schemas.GroupInvite, request: Reques
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al invitar al miembro.")
 
 
-@app.get("/groups/{group_id}", response_model=schemas.GroupResponse, tags=["Groups"])
+@app.get("/groups{group_id}", response_model=schemas.GroupResponse, tags=["Groups"])
 def get_group_details(group_id: int, request: Request, db: Session = Depends(get_db)):
     """
     Obtiene los detalles de un grupo específico, incluyendo la lista de miembros.

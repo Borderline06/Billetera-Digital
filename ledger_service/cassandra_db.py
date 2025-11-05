@@ -25,31 +25,40 @@ REPLICATION_FACTOR = int(os.getenv("CASSANDRA_REPLICATION_FACTOR", 1))
 def get_cassandra_session() -> Optional[Session]:
     """
     Establece conexión con el clúster de Cassandra y devuelve un objeto Session.
-    Implementa una política de reintentos para esperar a que el clúster esté disponible.
-
-    Returns:
-        Un objeto Session si la conexión es exitosa, None en caso contrario.
+    Implementa una política de reintentos robusta.
     """
-    # Usamos DCAwareRoundRobinPolicy asumiendo un solo datacenter llamado 'datacenter1'
-    # (es el nombre por defecto en las instalaciones de Cassandra en Docker)
-    cluster = Cluster(
-        [CASSANDRA_HOST],
-        load_balancing_policy=DCAwareRoundRobinPolicy(local_dc='datacenter1'),
-        port=9042
-    )
-
     attempts = 0
-    max_attempts = 20
-    wait_time = 10 # segundos
+    max_attempts = 30 # 30 intentos
+    wait_time = 10    # 10 segundos (Total: 5 minutos de espera)
+
+    cluster: Optional[Cluster] = None # <-- ¡CORRECCIÓN CLAVE 1! Definimos cluster como None aquí
 
     while attempts < max_attempts:
         try:
+            # 1. Crear un NUEVO objeto Cluster en CADA intento
+            cluster = Cluster(
+                [CASSANDRA_HOST],
+                load_balancing_policy=DCAwareRoundRobinPolicy(local_dc='datacenter1'),
+                port=9042,
+                # Añadimos un timeout de conexión más corto para fallar rápido
+                connect_timeout=5 
+            )
+
+            # 2. Intentar conectar
             session = cluster.connect()
+
             logger.info("Conexión a Cassandra establecida exitosamente.")
-            return session
+            return session # ¡Éxito! Salimos de la función.
+
         except Exception as e:
             attempts += 1
             logger.warning(f"Esperando a Cassandra... Intento {attempts}/{max_attempts}. Error: {e}")
+
+            # --- CORRECCIÓN CLAVE 2 ---
+            # Cerramos el cluster SÓLO SI llegó a crearse antes de fallar
+            if cluster:
+                 cluster.shutdown()
+
             if attempts < max_attempts:
                 time.sleep(wait_time)
 
@@ -82,19 +91,19 @@ def create_keyspace_and_tables(session: Session):
         logger.info("Verificando/Creando tabla 'transactions'...")
         session.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
-                id uuid PRIMARY KEY,           # Identificador único de la transacción
-                user_id int,                   # ID del usuario principal asociado (ej. quien inicia)
-                source_wallet_type text,       # Tipo de billetera origen ('BDI', 'BDG', 'EXTERNAL')
-                source_wallet_id text,         # ID de la billetera origen (user_id, group_id, u otro identificador)
-                destination_wallet_type text,  # Tipo de billetera destino ('BDI', 'BDG', 'EXTERNAL_BANK')
-                destination_wallet_id text,    # ID de la billetera destino (user_id, group_id, nro_celular, etc.)
-                type text,                     # Tipo de operación ('DEPOSIT', 'TRANSFER', 'CONTRIBUTION', 'WITHDRAWAL')
-                amount double,                 # Monto de la transacción
-                currency text,                 # Moneda (ej. 'PEN', 'USD') - Añadido para claridad
-                status text,                   # Estado ('PENDING', 'COMPLETED', 'FAILED_FUNDS', 'FAILED_REMOTE', etc.)
-                created_at timestamp,          # Marca de tiempo de creación
-                updated_at timestamp,          # Marca de tiempo de última actualización
-                metadata text                  # JSON como texto con detalles adicionales (ej. ID de transacción externa)
+                id uuid PRIMARY KEY,           
+                user_id int,                   
+                source_wallet_type text,       
+                source_wallet_id text,         
+                destination_wallet_type text, 
+                destination_wallet_id text,   
+                type text,                    
+                amount double,                 
+                currency text,                
+                status text,                  
+                created_at timestamp,         
+                updated_at timestamp,         
+                metadata text                  
             );
         """)
 
@@ -102,8 +111,8 @@ def create_keyspace_and_tables(session: Session):
         logger.info("Verificando/Creando tabla 'idempotency_keys'...")
         session.execute("""
             CREATE TABLE IF NOT EXISTS idempotency_keys (
-                key uuid PRIMARY KEY,          # La clave de idempotencia proporcionada por el cliente
-                transaction_id uuid            # El ID de la transacción asociada a esa clave
+                key uuid PRIMARY KEY,          
+                transaction_id uuid           
             );
         """)
 

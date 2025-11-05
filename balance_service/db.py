@@ -2,6 +2,8 @@
 
 import os
 import logging
+import time
+from fastapi import HTTPException
 from sqlalchemy import create_engine, exc
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
@@ -31,15 +33,33 @@ if missing_vars:
 SQLALCHEMY_DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}/{DB_NAME}"
 
 # Crea el motor (Engine) de SQLAlchemy
+
+# Reemplaza el bloque 'try...except' con esto:
+
 engine = None
-try:
-    engine = create_engine(SQLALCHEMY_DATABASE_URL, pool_pre_ping=True)
-    # Intenta conectar para verificar credenciales y disponibilidad al inicio
-    with engine.connect() as connection:
-        logger.info("Conexión a la base de datos establecida exitosamente.")
-except exc.SQLAlchemyError as e:
-    logger.error(f"Error al conectar con la base de datos: {e}", exc_info=True)
-    # El servicio no podrá funcionar sin la base de datos.
+attempts = 0
+max_attempts = 30
+wait_time = 10 # 10 segundos
+
+while attempts < max_attempts and engine is None:
+    try:
+        attempts += 1
+        logger.info(f"Intentando conectar a MariaDB (Intento {attempts}/{max_attempts})...")
+        engine = create_engine(SQLALCHEMY_DATABASE_URL, pool_pre_ping=True)
+
+        # Intenta conectar para verificar credenciales Y que la BD exista
+        with engine.connect() as connection:
+            logger.info("✅ Conexión a la base de datos (MariaDB) establecida exitosamente.")
+
+    except exc.SQLAlchemyError as e:
+        logger.warning(f"Fallo al conectar a MariaDB: {e}")
+        if attempts < max_attempts:
+            time.sleep(wait_time)
+        else:
+            logger.error("No se pudo conectar a MariaDB después de %d intentos.", max_attempts)
+            engine = None
+
+# El resto del archivo (SessionLocal = ..., Base = ...) se queda igual
 
 # Crea una fábrica de sesiones (SessionLocal)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine) if engine else None
@@ -47,11 +67,9 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine) if e
 # Crea una clase base (Base) para los modelos declarativos
 Base = declarative_base()
 
-# --- Función de Dependencia para FastAPI ---
 def get_db():
     """
     Generador de dependencia de FastAPI para obtener una sesión de base de datos.
-    Asegura que la sesión se cierre correctamente después de cada petición.
     """
     if SessionLocal is None:
         logger.error("La fábrica de sesiones de base de datos no está inicializada.")
@@ -60,13 +78,27 @@ def get_db():
     db = SessionLocal()
     try:
         yield db # Proporciona la sesión a la ruta
+
+    # --- INICIO DEL BLOQUE CORREGIDO (Opción 2 de tu amigo) ---
+    except HTTPException as http_exc:
+        # Si es un error HTTP (ej. 400 Fondos Insuficientes, 404 No Encontrado)
+        # lanzado a propósito desde main.py...
+        db.rollback() # Revertimos la transacción
+        logger.warning(f"Error HTTP controlado: {http_exc.detail}")
+        raise # <-- ¡La clave! Dejamos que FastAPI maneje el error HTTP.
+
     except exc.SQLAlchemyError as e:
+        # Si es un error de la base de datos (ej. conexión perdida)
         logger.error(f"Error de base de datos durante la petición: {e}", exc_info=True)
-        db.rollback() # Revierte la transacción en caso de error de BD
+        db.rollback() 
         raise HTTPException(status_code=500, detail="Error interno de base de datos.")
+
     except Exception as e:
-         logger.error(f"Error inesperado durante la petición: {e}", exc_info=True)
-         db.rollback() # Revierte también en errores generales
+         # Cualquier otro error inesperado (un bug nuestro)
+         logger.error(f"Error inesperado (no-HTTP) durante la petición: {e}", exc_info=True)
+         db.rollback() 
          raise HTTPException(status_code=500, detail="Error interno del servidor.")
+    # --- FIN DEL BLOQUE CORREGIDO ---
+
     finally:
-        db.close() # Cierra la sesión al finalizar la petición
+        db.close() # Cierra la sesión al finalizar

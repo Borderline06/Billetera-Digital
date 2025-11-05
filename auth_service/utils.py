@@ -2,6 +2,7 @@
 
 import os
 import logging
+import bcrypt
 from datetime import datetime, timedelta, timezone
 from passlib.context import CryptContext
 from jose import JWTError, jwt
@@ -27,7 +28,11 @@ ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 60 * 
 
 # --- Utilidades para Contraseñas ---
 # Configura bcrypt como el esquema de hashing preferido
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto",
+    
+)
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verifica una contraseña plana contra un hash almacenado."""

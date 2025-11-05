@@ -6,7 +6,7 @@ import uuid
 import logging # Añadido para logging en pruebas
 
 # Importar la URL base y fixtures desde conftest
-from .conftest import GATEWAY_URL
+from conftest import GATEWAY_URL
 
 # Configurar un logger simple para las pruebas
 logger = logging.getLogger(__name__)
