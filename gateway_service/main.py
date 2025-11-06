@@ -78,7 +78,7 @@ async def combined_middleware(request: Request, call_next):
 
     try:
         # --- Lógica de Seguridad (Autenticación) ---
-        request.state.user_id = None # Inicializar
+        request.state.user_id = user_id # Inicializar
         is_public = any(request.url.path.startswith(p) for p in PUBLIC_ROUTES)
 
         if not is_public:
