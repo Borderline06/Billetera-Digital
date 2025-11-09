@@ -30,6 +30,15 @@ class ContributionRequest(BaseModel):
 
 # --- Esquema de Salida (Respuesta) ---
 
+
+
+class P2PTransferRequest(BaseModel):
+    """Schema para la solicitud de transferencia P2P (BDI -> BDI)."""
+    # user_id (quien envía) vendrá del Gateway.
+    user_id: int 
+    amount: float = Field(..., gt=0)
+    destination_phone_number: str = Field(..., min_length=9, max_length=15)
+
 class Transaction(BaseModel):
     """
     Schema para representar una transacción completada, tal como se almacena

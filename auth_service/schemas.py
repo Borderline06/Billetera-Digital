@@ -9,6 +9,7 @@ class UserCreate(BaseModel):
     """Schema para los datos requeridos al crear un nuevo usuario."""
     email: str
     password: str = Field(..., min_length=8, description="La contraseña debe tener al menos 8 caracteres")
+    phone_number: str = Field(..., min_length=9, max_length=15)
 
 class UserResponse(BaseModel):
     """Schema para los datos devueltos tras la creación exitosa de un usuario (excluye contraseña)."""
@@ -28,6 +29,6 @@ class Token(BaseModel):
 
 class TokenPayload(BaseModel):
     """Schema que representa el payload decodificado de un token JWT válido."""
-    # 'sub' (subject) típicamente contiene el identificador del usuario. Usamos user_id como string.
+    
     sub: Optional[str] = None
-    exp: Optional[int] = None # 'exp' (expiration time) es una marca de tiempo Unix
+    exp: Optional[int] = None 

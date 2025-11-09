@@ -17,8 +17,6 @@ echo "Eliminando volúmenes nombrados (MariaDB, Cassandra, Grafana, n8n)..."
 # Adaptar el filtro si usas un nombre de proyecto diferente con `docker compose -p <nombre>`
 docker volume rm $(docker volume ls -q --filter name=billetera-digital_*) 2>/dev/null || echo "No se encontraron volúmenes nombrados para eliminar o ya estaban eliminados."
 
-# 3. (Opcional) Eliminar imágenes no utilizadas
-# echo "🖼️ Eliminando imágenes Docker no utilizadas (opcional)..."
-# docker image prune -af
+
 
 echo "Entorno completamente limpio."

@@ -3,7 +3,7 @@
 import os
 import logging
 import time
-from typing import Optional # Importado para type hint más preciso
+from typing import Optional 
 
 from cassandra.cluster import Cluster, Session
 from cassandra.policies import DCAwareRoundRobinPolicy
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Lee la configuración de Cassandra desde el entorno
 CASSANDRA_HOST = os.getenv("CASSANDRA_HOST", "cassandra1") # Nodo(s) semilla
 KEYSPACE = "wallet_ledger" # Nombre de nuestro espacio de claves (base de datos)
-# Para desarrollo local, RF=1 es más simple aunque tengamos 3 nodos. En producción usar RF=3.
+
 REPLICATION_FACTOR = int(os.getenv("CASSANDRA_REPLICATION_FACTOR", 1))
 
 def get_cassandra_session() -> Optional[Session]:
@@ -31,7 +31,7 @@ def get_cassandra_session() -> Optional[Session]:
     max_attempts = 30 # 30 intentos
     wait_time = 10    # 10 segundos (Total: 5 minutos de espera)
 
-    cluster: Optional[Cluster] = None # <-- ¡CORRECCIÓN CLAVE 1! Definimos cluster como None aquí
+    cluster: Optional[Cluster] = None 
 
     while attempts < max_attempts:
         try:
@@ -48,13 +48,13 @@ def get_cassandra_session() -> Optional[Session]:
             session = cluster.connect()
 
             logger.info("Conexión a Cassandra establecida exitosamente.")
-            return session # ¡Éxito! Salimos de la función.
+            return session 
 
         except Exception as e:
             attempts += 1
             logger.warning(f"Esperando a Cassandra... Intento {attempts}/{max_attempts}. Error: {e}")
 
-            # --- CORRECCIÓN CLAVE 2 ---
+            
             # Cerramos el cluster SÓLO SI llegó a crearse antes de fallar
             if cluster:
                  cluster.shutdown()
@@ -116,12 +116,36 @@ def create_keyspace_and_tables(session: Session):
             );
         """)
 
+       
+        # Esta es la tabla optimizada para LEER el historial de un usuario.
+        # Duplicamos datos (normal en NoSQL) para tener consultas rápidas.
+        logger.info("Verificando/Creando tabla 'transactions_by_user'...")
+        session.execute(f"""
+        CREATE TABLE IF NOT EXISTS {KEYSPACE}.transactions_by_user (
+            user_id int,
+            created_at timestamp,
+            id uuid,
+            source_wallet_type text,
+            source_wallet_id text,
+            destination_wallet_type text,
+            destination_wallet_id text,
+            type text,
+            amount decimal,
+            currency text,
+            status text,
+            metadata text,
+            updated_at timestamp,
+            PRIMARY KEY (user_id, created_at, id)
+        ) WITH CLUSTERING ORDER BY (created_at DESC);
+        """)
+        
+
         # --- 4. Crear Índice Secundario en 'user_id' ---
         logger.info("Verificando/Creando índice en 'transactions(user_id)'...")
         session.execute("""
             CREATE INDEX IF NOT EXISTS idx_transactions_user_id ON transactions (user_id);
         """)
-        # Considerar índices adicionales según las consultas frecuentes (ej. source_wallet_id, destination_wallet_id)
+        
 
         logger.info("Schema de Cassandra verificado/creado exitosamente.")
 

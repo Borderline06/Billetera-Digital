@@ -4,11 +4,13 @@ import os
 import httpx
 import logging
 import time
+import json
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Request, HTTPException, status, Header, Depends
 from fastapi.responses import JSONResponse, Response
 from dotenv import load_dotenv
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
-from typing import Optional # Importar Optional
+from typing import Optional 
 
 # Carga variables de entorno
 load_dotenv()
@@ -38,6 +40,22 @@ app = FastAPI(
     description="Punto de entrada único para todos los servicios de la billetera digital.",
     version="1.0.0"
 )
+
+# --- Configuración de CORS ---
+origins = [
+    "http://localhost",
+    "http://localhost:3001",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True, 
+    allow_methods=["*"],    
+    allow_headers=["*"],    
+)
+
+
 
 # --- Rutas Públicas (no requieren token) ---
 PUBLIC_ROUTES = [
@@ -77,6 +95,10 @@ async def combined_middleware(request: Request, call_next):
     endpoint = request.url.path
 
     try:
+        if request.method == "OPTIONS":
+            response = await call_next(request)
+            status_code = response.status_code 
+            return response
         # --- Lógica de Seguridad (Autenticación) ---
         request.state.user_id = user_id # Inicializar
         is_public = any(request.url.path.startswith(p) for p in PUBLIC_ROUTES)
@@ -96,7 +118,7 @@ async def combined_middleware(request: Request, call_next):
                     raise HTTPException(verify_response.status_code, detail)
 
                 token_payload = verify_response.json()
-                user_id_str = token_payload.get("sub")
+                user_id_str = token_payload.get("sub") or token_payload.get("user_id")
                 if user_id_str:
                     user_id = int(user_id_str)
                     request.state.user_id = user_id # Inyectamos user_id para los endpoints
@@ -182,7 +204,7 @@ async def forward_request(request: Request, target_url: str, inject_user_id: boo
             headers_to_forward[header_name] = header_value
 
     if user_id:
-        headers_to_forward["X-User-ID"] = str(user_id)
+        headers_to_forward["X-User-Id"] = str(user_id)
 
     try:
         if request.method in ["POST", "PUT", "PATCH"]:
@@ -267,6 +289,33 @@ async def proxy_contribute(request: Request, user_id: int = Depends(get_current_
     logger.info(f"Proxying request to /ledger/contribute for user_id: {user_id}")
     return await forward_request(request, f"{LEDGER_URL}/contribute", inject_user_id=True, pass_headers=["Idempotency-Key", "Authorization"])
 
+# ... (después de @app.post("/ledger/contribute") ...)
+
+@app.post("/ledger/transfer/p2p", tags=["Ledger"])
+async def proxy_transfer_p2p(request: Request, user_id: int = Depends(get_current_user_id)):
+    """Reenvía la solicitud de transferencia P2P, inyectando el user_id (remitente)."""
+    logger.info(f"Proxying request to /ledger/transfer/p2p for user_id: {user_id}")
+    return await forward_request(
+        request, 
+        f"{LEDGER_URL}/transfer/p2p", 
+        inject_user_id=True,
+        pass_headers=["Idempotency-Key", "Authorization"]
+    )
+
+
+@app.get("/ledger/transactions/me", tags=["Ledger"])
+async def proxy_get_my_transactions(request: Request, user_id: int = Depends(get_current_user_id)):
+    """Obtiene el historial de movimientos del usuario autenticado."""
+    logger.info(f"Proxying request to /ledger/transactions/me for user_id: {user_id}")
+
+    
+    # El user_id se pasa por el header X-User-ID
+    return await forward_request(
+        request, 
+        f"{LEDGER_URL}/transactions/me",
+        pass_headers=["Authorization"]
+    )
+
 # --- Endpoints Privados (Proxy para Group) ---
 
 @app.post("/groups", status_code=status.HTTP_201_CREATED, tags=["Groups"])
@@ -279,7 +328,7 @@ async def proxy_create_group(request: Request, user_id: int = Depends(get_curren
     return await forward_request(
         request, 
         f"{GROUP_URL}/groups", 
-        inject_user_id=True, # ¡Inyecta el user_id!
+        inject_user_id=False, 
         pass_headers=["Authorization"]
     )
 
@@ -290,7 +339,7 @@ async def proxy_invite_member(group_id: int, request: Request, user_id: int = De
     return await forward_request(
         request, 
         f"{GROUP_URL}/groups/{group_id}/invite", 
-        inject_user_id=True, # El group_service necesita saber QUIÉN invita
+        inject_user_id=False, 
         pass_headers=["Authorization"]
     )
 
@@ -301,7 +350,22 @@ async def proxy_get_group(group_id: int, request: Request, user_id: int = Depend
     return await forward_request(
         request, 
         f"{GROUP_URL}/groups/{group_id}", 
-        inject_user_id=True, # El group_service necesita saber si el usuario es miembro
+        inject_user_id=False, 
+        pass_headers=["Authorization"]
+    )
+
+
+
+@app.get("/groups/me", tags=["Groups"])
+async def proxy_get_my_groups(request: Request, user_id: int = Depends(get_current_user_id)):
+    """Obtiene los grupos del usuario autenticado."""
+    logger.info(f"Proxying request to /groups/me for user_id: {user_id}")
+
+   
+    return await forward_request(
+        request, 
+        f"{GROUP_URL}/groups/me",
+        inject_user_id=False, 
         pass_headers=["Authorization"]
     )
 

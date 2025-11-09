@@ -19,15 +19,14 @@ logger = logging.getLogger(__name__)
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 if not SECRET_KEY:
     logger.warning("JWT_SECRET_KEY no está definida en las variables de entorno. Usando clave insegura por defecto para desarrollo.")
-    # Clave por defecto SOLO para desarrollo local. NUNCA usar en producción.
+    
     SECRET_KEY = "clave_secreta_insegura_por_defecto_cambiar_urgentemente" 
 
 ALGORITHM = "HS256"
-# Tiempo de vida del token de acceso (ej., 1 día)
+
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 60 * 24))
 
-# --- Utilidades para Contraseñas ---
-# Configura bcrypt como el esquema de hashing preferido
+
 pwd_context = CryptContext(
     schemes=["bcrypt"],
     deprecated="auto",
@@ -75,9 +74,9 @@ def decode_token(token: str) -> Optional[Dict]:
             token,
             SECRET_KEY,
             algorithms=[ALGORITHM],
-            options={"verify_aud": False} # No necesitamos validar 'audience' en este caso simple
+            options={"verify_aud": False} 
         )
-        # Verificamos explícitamente la expiración aunque jwt.decode debería hacerlo
+       
         if payload.get("exp") and datetime.now(timezone.utc) < datetime.fromtimestamp(payload["exp"], tz=timezone.utc):
              return payload
         else:
@@ -95,4 +94,4 @@ def decode_token(token: str) -> Optional[Dict]:
 BALANCE_SERVICE_URL = os.getenv("BALANCE_SERVICE_URL")
 if not BALANCE_SERVICE_URL:
      logger.error("Variable de entorno BALANCE_SERVICE_URL no está definida.")
-     # El servicio podría fallar más tarde si necesita esta URL.
+     

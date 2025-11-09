@@ -4,6 +4,7 @@ import os
 import logging
 import time
 from fastapi import HTTPException
+from fastapi.exceptions import RequestValidationError
 from sqlalchemy import create_engine, exc
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
@@ -27,14 +28,11 @@ required_db_vars = {"DB_USER", "DB_PASS", "DB_HOST", "DB_NAME"}
 missing_vars = required_db_vars - set(os.environ)
 if missing_vars:
     logger.error(f"Faltan variables de entorno para la base de datos: {', '.join(missing_vars)}")
-    # Considerar lanzar una excepción o salir si la conexión es crítica al inicio
-    # raise EnvironmentError(f"Missing DB environment variables: {', '.join(missing_vars)}")
+    
 
 SQLALCHEMY_DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}/{DB_NAME}"
 
-# Crea el motor (Engine) de SQLAlchemy: el punto de entrada a la base de datos.
-# pool_pre_ping=True ayuda a manejar conexiones inactivas en el pool.
-# Reemplaza el bloque 'try...except' con esto:
+
 
 engine = None
 attempts = 0
@@ -59,21 +57,18 @@ while attempts < max_attempts and engine is None:
             logger.error("No se pudo conectar a MariaDB después de %d intentos.", max_attempts)
             engine = None
 
-# El resto del archivo (SessionLocal = ..., Base = ...) se queda igual
 
 
-# Crea una fábrica de sesiones (SessionLocal): permite crear sesiones individuales
-# para interactuar con la base de datos. Cada petición web usará su propia sesión.
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine) if engine else None
 
-# Crea una clase base (Base) para los modelos declarativos:
-# Nuestros modelos de tabla (como User) heredarán de esta clase.
+
 Base = declarative_base()
 
 
 def get_db():
     """
     Generador de dependencia de FastAPI para obtener una sesión de base de datos.
+    Maneja commits, rollbacks y errores de forma centralizada.
     """
     if SessionLocal is None:
         logger.error("La fábrica de sesiones de base de datos no está inicializada.")
@@ -81,28 +76,32 @@ def get_db():
 
     db = SessionLocal()
     try:
-        yield db # Proporciona la sesión a la ruta
+        yield db
 
-    # --- INICIO DEL BLOQUE CORREGIDO (Opción 2 de tu amigo) ---
+    
+    except RequestValidationError as validation_exc:
+        
+        logger.warning(f"Error de validación: {validation_exc.errors()}")
+        db.rollback()
+        raise validation_exc
+
     except HTTPException as http_exc:
-        # Si es un error HTTP (ej. 400 Fondos Insuficientes, 404 No Encontrado)
-        # lanzado a propósito desde main.py...
-        db.rollback() # Revertimos la transacción
+        
+        db.rollback()
         logger.warning(f"Error HTTP controlado: {http_exc.detail}")
-        raise # <-- ¡La clave! Dejamos que FastAPI maneje el error HTTP.
+        raise http_exc 
 
     except exc.SQLAlchemyError as e:
-        # Si es un error de la base de datos (ej. conexión perdida)
+        
+        db.rollback()
         logger.error(f"Error de base de datos durante la petición: {e}", exc_info=True)
-        db.rollback() 
         raise HTTPException(status_code=500, detail="Error interno de base de datos.")
 
     except Exception as e:
-         # Cualquier otro error inesperado (un bug nuestro)
-         logger.error(f"Error inesperado (no-HTTP) durante la petición: {e}", exc_info=True)
+        
          db.rollback() 
+         logger.error(f"Error inesperado (no-HTTP) durante la petición: {e}", exc_info=True)
          raise HTTPException(status_code=500, detail="Error interno del servidor.")
-    # --- FIN DEL BLOQUE CORREGIDO ---
-
+   
     finally:
-        db.close() # Cierra la sesión al finalizar
+        db.close() 

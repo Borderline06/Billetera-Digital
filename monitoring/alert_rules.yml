@@ -4,8 +4,7 @@ groups:
   - name: EstadoServiciosCriticos
     rules:
       # --- Regla: Servicio Caído ---
-      # Se activa si Prometheus no puede obtener métricas de una instancia ('up == 0')
-      # durante el periodo especificado ('for').
+    
       - alert: ServicioCaido
         expr: up == 0
         for: 1m # Espera 1 minuto de caída continua antes de alertar

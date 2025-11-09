@@ -22,7 +22,7 @@ class Account(Base):
     # NOTA: Float se usa por simplicidad; en producción se recomienda usar Decimal para precisión monetaria.
     balance = Column(Float, nullable=False, default=0.0)
 
-    # Moneda de la cuenta (ej. "PEN", "USD").
+    # Moneda de la cuenta 
     currency = Column(String(10), nullable=False, default="USD")
 
 
@@ -30,12 +30,12 @@ class GroupAccount(Base):
     """Modelo de la cuenta de una Billetera Grupal (BDG)."""
     __tablename__ = "group_accounts"
 
-    # Usamos el group_id del group_service como PK
+    
     group_id = Column(Integer, primary_key=True, index=True) 
 
     balance = Column(Numeric(10, 2), nullable=False, default=0.00)
 
-    # Versión para control de concurrencia (optimistic locking)
+    
     version = Column(Integer, nullable=False, default=1) 
 
     __mapper_args__ = {

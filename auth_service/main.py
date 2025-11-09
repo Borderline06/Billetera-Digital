@@ -31,7 +31,7 @@ try:
     logger.info("Database tables verified/created.")
 except Exception as e:
     logger.error(f"Error initializing database: {e}", exc_info=True)
-    # En un entorno real, podríamos querer que el servicio falle si no puede conectarse a la BD.
+    
 
 # Inicializa FastAPI
 app = FastAPI(
@@ -67,17 +67,12 @@ async def metrics_middleware(request: Request, call_next):
         raise http_exc
     except Exception as exc:
         logger.error(f"Unhandled exception during request processing: {exc}", exc_info=True)
-        # Devolver respuesta genérica 500 para excepciones no controladas
+        
         return Response("Internal Server Error", status_code=500)
     finally:
         latency = time.time() - start_time
         endpoint = request.url.path
 
-        # Normalizar endpoint para métricas (ej. /users/1 -> /users/{id})
-        # Adaptar según las rutas reales que necesiten normalización.
-        # parts = endpoint.split("/")
-        # if len(parts) > 2 and parts[1] == "users" and parts[2].isdigit():
-        #     endpoint = f"/{parts[1]}/{{id}}"
 
         # Obtener status_code final de forma segura
         final_status_code = getattr(response, 'status_code', status_code)
@@ -100,7 +95,7 @@ def metrics():
 @app.get("/health", tags=["Monitoring"])
 def health_check():
     """Performs a basic health check of the service."""
-    # Podría incluir un chequeo de conectividad a la base de datos.
+    
     return {"status": "ok", "service": "auth_service"}
 
 # --- Endpoints de API ---
@@ -119,9 +114,15 @@ async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered",
         )
+    
+        
+    db_phone = db.query(User).filter(User.phone_number == user.phone_number).first()
+    if db_phone:
+        raise HTTPException(status_code=400, detail="Número de celular ya registrado")
+    
 
     hashed_password = get_password_hash(user.password)
-    new_user = User(email=user.email, hashed_password=hashed_password)
+    new_user = User(email=user.email, hashed_password=hashed_password,phone_number=user.phone_number)
 
     try:
         db.add(new_user)
@@ -133,33 +134,33 @@ async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
         logger.error(f"Database error during user creation for email {user.email}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not save user.")
 
-    # Call Balance Service to create the balance account (compensation logic included)
+    
     async with httpx.AsyncClient() as client:
         try:
             create_account_url = f"{BALANCE_SERVICE_URL}/accounts"
             response = await client.post(create_account_url, json={"user_id": new_user.id})
-            response.raise_for_status() # Raises exception for 4xx/5xx responses
+            response.raise_for_status() 
             logger.info(f"Successfully called Balance Service for user_id: {new_user.id}")
         except (httpx.RequestError, httpx.HTTPStatusError) as exc:
             logger.error(f"Failed to call Balance Service for user_id {new_user.id}: {exc}", exc_info=True)
-            # Compensation: Attempt to delete the user if account creation failed
+            
             logger.warning(f"Attempting to revert user creation for user_id {new_user.id} due to Balance Service failure.")
             try:
                 db.delete(new_user)
                 db.commit()
                 logger.info(f"Successfully reverted user creation for user_id {new_user.id}.")
             except Exception as delete_e:
-                # Log critical failure if user deletion fails
+                
                 logger.critical(f"CRITICAL: Failed to revert user creation for user_id {new_user.id}: {delete_e}", exc_info=True)
-                # This state requires manual intervention or a reconciliation process.
+               
 
             status_code = status.HTTP_503_SERVICE_UNAVAILABLE
             detail = f"Balance Service unavailable or failed."
             if isinstance(exc, httpx.HTTPStatusError):
                 status_code = exc.response.status_code
-                try: # Attempt to get detail from Balance Service response
+                try: 
                     detail = f"Balance Service error: {exc.response.json().get('detail', exc.response.text)}"
-                except: # Fallback if response is not JSON
+                except: 
                      detail = f"Balance Service error: Status {status_code}"
             raise HTTPException(status_code=status_code, detail=detail)
 
@@ -183,14 +184,14 @@ def login(db: Session = Depends(get_db), form_data: OAuth2PasswordRequestForm = 
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Token payload contains user ID ('sub') and expiration ('exp')
+  
     access_token = create_access_token(data={"sub": str(user.id)})
     logger.info(f"Login successful for user_id: {user.id}")
     return {"access_token": access_token, "token_type": "bearer"}
 
 
 @app.get("/verify", response_model=schemas.TokenPayload, tags=["Internal"])
-def verify(token: str): # <-- CORREGIDO: Solo el tipo str
+def verify(token: str): 
     """
     Valida un token JWT (pasado como query parameter 'token') y devuelve su payload.
     Usado por el API Gateway.
@@ -202,5 +203,20 @@ def verify(token: str): # <-- CORREGIDO: Solo el tipo str
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
         )
-    # logger.debug(f"Token verificado correctamente para sub: {payload.get('sub')}")
+    
     return payload
+
+
+
+@app.get("/users/by-phone/{phone_number}", response_model=schemas.UserResponse, tags=["Users"])
+def get_user_by_phone(phone_number: str, db: Session = Depends(get_db)):
+    """
+    Busca un usuario por su número de celular.
+    (Usado internamente por ledger_service para transferencias P2P).
+    """
+    logger.info(f"Buscando usuario por número de celular: {phone_number}")
+    db_user = db.query(User).filter(User.phone_number == phone_number).first()
+    if db_user is None:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado con ese número de celular")
+    return db_user
+

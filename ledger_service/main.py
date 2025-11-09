@@ -6,11 +6,11 @@ import uuid
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import FastAPI, Depends, HTTPException, status, Header, Request, Response
 from cassandra.cluster import Session
-from cassandra.query import SimpleStatement
+from cassandra.query import SimpleStatement, BatchStatement
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 import time
 
@@ -34,6 +34,7 @@ except ImportError:
 BALANCE_SERVICE_URL = os.getenv("BALANCE_SERVICE_URL")
 INTERBANK_SERVICE_URL = os.getenv("INTERBANK_SERVICE_URL")
 INTERBANK_API_KEY = os.getenv("INTERBANK_API_KEY", "dummy-key-for-dev")
+AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL")
 KEYSPACE = cassandra_db.KEYSPACE
 
 # Configura logger (si no se hizo arriba)
@@ -60,7 +61,7 @@ def startup_event():
             cassandra_db.create_keyspace_and_tables(db_session)
         except Exception as e:
             logger.critical(f"FATAL: Error al configurar schema de Cassandra: {e}. El servicio no funcionará.", exc_info=True)
-            db_session = None # Marcar como no disponible
+            db_session = None 
     else:
         logger.critical("FATAL: No se pudo conectar a Cassandra al inicio. El servicio no funcionará.")
 
@@ -87,6 +88,10 @@ REQUEST_LATENCY = Histogram("ledger_request_latency_seconds", "Request latency",
 DEPOSIT_COUNT = Counter("ledger_deposits_total", "Número total de depósitos procesados")
 TRANSFER_COUNT = Counter("ledger_transfers_total", "Número total de transferencias procesadas")
 CONTRIBUTION_COUNT = Counter("ledger_contributions_total", "Número total de aportes a grupos")
+LEDGER_P2P_TRANSFERS_TOTAL = Counter(
+    "ledger_p2p_transfers_total",
+    "Total de transferencias P2P (BDI -> BDI) procesadas"
+)
 
 # --- Middleware para Métricas ---
 @app.middleware("http")
@@ -171,19 +176,34 @@ async def deposit(
     status_final = "PENDING"
     currency = "PEN"
 
+   
     try:
-        db.execute(
-            f"""
+        # Preparamos las dos consultas (para 'transactions' y 'transactions_by_user')
+        query_by_id = SimpleStatement(f"""
             INSERT INTO {KEYSPACE}.transactions (
                 id, user_id, source_wallet_type, source_wallet_id,
                 destination_wallet_type, destination_wallet_id, type, amount, currency,
                 status, created_at, updated_at, metadata
             ) VALUES (%s, %s, 'EXTERNAL', 'N/A', 'BDI', %s, 'DEPOSIT', %s, %s, %s, %s, %s, %s)
-            """,
-            (tx_id, req.user_id, str(req.user_id), req.amount, currency, status_final, now, now, metadata_json)
-        )
+        """)
+
+        query_by_user = SimpleStatement(f"""
+            INSERT INTO {KEYSPACE}.transactions_by_user (
+                user_id, created_at, id, source_wallet_type, source_wallet_id,
+                destination_wallet_type, destination_wallet_id, type, amount, currency,
+                status, updated_at, metadata
+            ) VALUES (%s, %s, %s, 'EXTERNAL', 'N/A', 'BDI', %s, 'DEPOSIT', %s, %s, %s, %s, %s)
+        """)
+
+        # Usamos un BATCH para asegurar que ambas escrituras ocurran o ninguna
+        batch = BatchStatement()
+        batch.add(query_by_id, (tx_id, req.user_id, str(req.user_id), req.amount, currency, status_final, now, now, metadata_json))
+        batch.add(query_by_user, (req.user_id, now, tx_id, str(req.user_id), req.amount, currency, status_final, now, metadata_json))
+
+        db.execute(batch)
+
     except Exception as e:
-        logger.error(f"Error al insertar tx PENDING (depósito) {tx_id}: {e}", exc_info=True)
+        logger.error(f"Error al insertar BATCH PENDING (depósito) {tx_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error al registrar la transacción inicial")
 
     try:
@@ -231,7 +251,7 @@ async def deposit(
 
 @app.post("/transfer", response_model=schemas.Transaction, status_code=status.HTTP_201_CREATED, tags=["Transactions"])
 async def transfer(
-    req: schemas.TransferRequest, # <-- USA EL SCHEMA CORREGIDO
+    req: schemas.TransferRequest, 
     idempotency_key: Optional[str] = Header(None, description="Clave única (UUID v4) para idempotencia"),
     db: Session = Depends(get_db)
 ):
@@ -251,28 +271,38 @@ async def transfer(
 
     tx_id = uuid.uuid4()
     now = datetime.now(timezone.utc)
-    # --- CORREGIDO: Usar req.destination_phone_number ---
+    
     metadata = {"to_bank": req.to_bank, "destination_phone_number": req.destination_phone_number}
     status_final = "PENDING"
     currency = "PEN"
 
+        # En la función transfer(), reemplaza el primer 'try...'
     try:
-        db.execute(
-            f"""
+        query_by_id = SimpleStatement(f"""
             INSERT INTO {KEYSPACE}.transactions (
                 id, user_id, source_wallet_type, source_wallet_id,
                 destination_wallet_type, destination_wallet_id, type, amount, currency,
                 status, created_at, updated_at, metadata
             ) VALUES (%s, %s, 'BDI', %s, 'EXTERNAL_BANK', %s, 'TRANSFER', %s, %s, %s, %s, %s, %s)
-            """,
-            # --- CORREGIDO: Usar req.destination_phone_number ---
-            (tx_id, req.user_id, str(req.user_id), req.destination_phone_number,
-             req.amount, currency, status_final, now, now, json.dumps(metadata))
-        )
+        """)
+
+        query_by_user = SimpleStatement(f"""
+            INSERT INTO {KEYSPACE}.transactions_by_user (
+                user_id, created_at, id, source_wallet_type, source_wallet_id,
+                destination_wallet_type, destination_wallet_id, type, amount, currency,
+                status, updated_at, metadata
+            ) VALUES (%s, %s, %s, 'BDI', %s, 'EXTERNAL_BANK', %s, 'TRANSFER', %s, %s, %s, %s, %s)
+        """)
+
+        batch = BatchStatement()
+        batch.add(query_by_id, (tx_id, req.user_id, str(req.user_id), req.destination_phone_number, req.amount, currency, status_final, now, now, json.dumps(metadata)))
+        batch.add(query_by_user, (req.user_id, now, tx_id, str(req.user_id), req.destination_phone_number, req.amount, currency, status_final, now, json.dumps(metadata)))
+
+        db.execute(batch)
+
     except Exception as e:
-        logger.error(f"Error al insertar tx PENDING (transfer) {tx_id}: {e}", exc_info=True)
+        logger.error(f"Error al insertar BATCH PENDING (transfer) {tx_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error al registrar la transacción inicial")
-    
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -327,7 +357,7 @@ async def transfer(
 
     # --- INICIO DEL BLOQUE CORREGIDO ---
     except httpx.HTTPStatusError as e:
-        # ¡Este es el error que SÍ queremos! (ej. 400 Fondos Insuficientes, 404 Cuenta no encontrada)
+        
         status_code = e.response.status_code
         try:
             detail = e.response.json().get("detail", "Error desconocido del servicio interno.")
@@ -357,7 +387,7 @@ async def transfer(
                 (status_final, json.dumps(metadata), datetime.now(timezone.utc), tx_id))
         logger.error(f"Error inesperado en tx {tx_id} (transferencia): {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno inesperado procesando la transferencia")
-    # --- FIN DEL BLOQUE try...except CORREGIDO ---
+    
 
     # Si todo fue exitoso
     if status_final == "COMPLETED":
@@ -447,7 +477,7 @@ async def contribute_to_group(
             # 4. Todo OK
             status_final = "COMPLETED"
 
-    # --- INICIO DEL BLOQUE CORREGIDO ---
+    
     except httpx.HTTPStatusError as e: # Captura errores 4xx/5xx de balance_service
         status_code = e.response.status_code
         try:
@@ -492,7 +522,7 @@ async def contribute_to_group(
                 (status_final, datetime.now(timezone.utc), tx_id))
         logger.error(f"Error inesperado en tx {tx_id} (aporte): {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno inesperado procesando el aporte")
-    # --- FIN DEL BLOQUE try...except CORREGIDO ---
+    
 
     # Si todo fue exitoso
     if status_final == "COMPLETED":
@@ -515,6 +545,177 @@ async def contribute_to_group(
     return schemas.Transaction(**tx_data)
 
 
+
+@app.get("/transactions/me", response_model=List[schemas.Transaction], tags=["Ledger"])
+async def get_my_transactions(
+    x_user_id: int = Header(..., alias="X-User-ID"),
+    db: Session = Depends(get_db)
+):
+    """
+    Obtiene el historial de transacciones (movimientos) para el usuario autenticado.
+    Lee directamente de la base de datos NoSQL (Cassandra).
+    """
+    logger.info(f"Obteniendo historial de movimientos para user_id: {x_user_id}")
+
+    # Cassandra 
+    query = SimpleStatement(f"""
+        SELECT * FROM {KEYSPACE}.transactions_by_user
+        WHERE user_id = %s
+        ORDER BY created_at DESC
+        LIMIT 50
+    """)
+
+    try:
+        # Ejecutamos la consulta
+        result_set = db.execute(query, (x_user_id,))
+
+        # Convertimos las filas de Cassandra a nuestro schema Pydantic
+        transactions = [schemas.Transaction(**row._asdict()) for row in result_set]
+
+        return transactions
+    except Exception as e:
+        logger.error(f"Error al obtener transacciones para user_id {x_user_id}: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error al obtener historial de movimientos.")
+
+
+
+
+
+@app.post("/transfer/p2p", response_model=schemas.Transaction, status_code=status.HTTP_201_CREATED, tags=["Transactions"])
+async def transfer_p2p(
+    req: schemas.P2PTransferRequest,
+    idempotency_key: Optional[str] = Header(None, description="Clave única (UUID v4) para idempotencia"),
+    db: Session = Depends(get_db)
+):
+    """
+    Procesa una transferencia P2P (BDI -> BDI) entre usuarios de Pixel Money.
+    Orquesta una SAGA:
+    1. Resuelve el celular del destinatario (Auth Service).
+    2. Verifica y Debita al remitente (Balance Service).
+    3. Acredita al destinatario (Balance Service).
+    4. Si falla el crédito, revierte el débito.
+    5. Escribe ambas transacciones en Cassandra (Batch).
+    """
+    if idempotency_key is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cabecera Idempotency-Key es requerida")
+
+    sender_id = req.user_id # Inyectado por el Gateway
+    recipient_phone = req.destination_phone_number
+    amount = req.amount
+
+    # 0. Evitar auto-transferencias (Requerimiento de negocio)
+    # (Necesitamos el celular del sender, pero no lo tenemos. Lo omitimos por ahora)
+
+    # 1. Verificar Idempotencia
+    existing_tx_id = check_idempotency(db, idempotency_key)
+    if existing_tx_id:
+        logger.info(f"Transferencia P2P duplicada (Key: {idempotency_key}). Devolviendo tx: {existing_tx_id}")
+        tx_data = await get_transaction_by_id(db, existing_tx_id)
+        if tx_data: return schemas.Transaction(**tx_data)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error de idempotencia: Tx original no encontrada")
+
+    tx_id_debit = uuid.uuid4() # ID para la transacción de salida
+    tx_id_credit = uuid.uuid4() # ID para la transacción de entrada
+    now = datetime.now(timezone.utc)
+    currency = "PEN"
+    recipient_id = None
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            # --- PASO 1: Resolver Destinatario (AUTH SERVICE) ---
+            logger.debug(f"Tx {tx_id_debit}: Buscando destinatario por celular: {recipient_phone}")
+            auth_res = await client.get(f"{AUTH_SERVICE_URL}/users/by-phone/{recipient_phone}")
+            auth_res.raise_for_status() # Lanza 404 si el usuario no existe
+
+            recipient_id = int(auth_res.json()["id"])
+            if recipient_id == sender_id:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "No puedes transferirte dinero a ti mismo.")
+
+            # --- PASO 2: Verificar y Debitar Remitente (BALANCE SERVICE) ---
+            logger.debug(f"Tx {tx_id_debit}: Verificando fondos y debitando a user_id {sender_id}")
+
+            # Verificamos fondos (el 'check' ya está en el 'debit', pero es buena práctica)
+            check_res = await client.post(f"{BALANCE_SERVICE_URL}/balance/check", json={"user_id": sender_id, "amount": amount})
+            check_res.raise_for_status() # Lanza 400 si no hay fondos
+
+            # Debitamos
+            debit_res = await client.post(f"{BALANCE_SERVICE_URL}/balance/debit", json={"user_id": sender_id, "amount": amount})
+            debit_res.raise_for_status() # Lanza 400 si falla en la concurrencia
+
+            logger.info(f"Tx {tx_id_debit}: Débito de {amount} a {sender_id} exitoso.")
+
+            # --- PASO 3: Acreditar Destinatario (BALANCE SERVICE) ---
+            try:
+                logger.debug(f"Tx {tx_id_credit}: Acreditando {amount} a user_id {recipient_id}")
+                credit_res = await client.post(f"{BALANCE_SERVICE_URL}/balance/credit", json={"user_id": recipient_id, "amount": amount})
+                credit_res.raise_for_status()
+                logger.info(f"Tx {tx_id_credit}: Crédito a {recipient_id} exitoso.")
+
+            except Exception as credit_error:
+                # ¡FALLO CRÍTICO! El débito se hizo pero el crédito falló.
+                # --- INICIO DE REVERSIÓN (SAGA) ---
+                logger.error(f"¡FALLO DE SAGA! Tx {tx_id_credit} falló. Revertiendo débito {tx_id_debit} para {sender_id}...")
+                try:
+                    revert_res = await client.post(f"{BALANCE_SERVICE_URL}/balance/credit", json={"user_id": sender_id, "amount": amount})
+                    revert_res.raise_for_status()
+                    logger.info(f"Reversión de débito {tx_id_debit} para {sender_id} exitosa.")
+                except Exception as revert_error:
+                    logger.critical(f"¡¡FALLO CRÍTICO DE REVERSIÓN!! El débito {tx_id_debit} no pudo ser revertido. ¡REQUERIRÁ INTERVENCIÓN MANUAL! Error: {revert_error}")
+                
+                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "El servicio del destinatario falló. La transacción ha sido revertida.")
+
+        except httpx.HTTPStatusError as e:
+            # Error de 'check' (400), 'auth' (404), o 'debit' (400)
+            status_code = e.response.status_code
+            detail = e.response.json().get("detail", "Error en servicios internos.")
+            logger.warning(f"Fallo transferencia P2P: {detail} (Status: {status_code})")
+            raise HTTPException(status_code=status_code, detail=detail)
+
+        except httpx.RequestError as e:
+            logger.error(f"Error de red en transferencia P2P: {e}", exc_info=True)
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Error de comunicación entre servicios.")
+
+    # --- PASO 4: Escribir en Cassandra (BATCH) ---
+    # Si llegamos aquí, la SAGA (débito y crédito) fue exitosa.
+    try:
+        batch = BatchStatement()
+
+        # Consulta 1: Transacción de SALIDA (Débito)
+        q_debit_by_id = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions (...) VALUES (...)") # (Abreviado por claridad)
+        q_debit_by_user = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions_by_user (...) VALUES (...)")
+
+        
+
+        # Consulta 2: Transacción de ENTRADA (Crédito)
+        q_credit_by_id = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions (...) VALUES (...)")
+        q_credit_by_user = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions_by_user (...) VALUES (...)")
+
+        
+
+        query_by_id = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions (id, user_id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, created_at, updated_at) VALUES (%s, %s, 'BDI', %s, 'BDI', %s, 'P2P_SENT', %s, %s, 'COMPLETED', %s, %s)")
+        query_by_user = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions_by_user (user_id, created_at, id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, updated_at) VALUES (%s, %s, %s, 'BDI', %s, 'BDI', %s, 'P2P_SENT', %s, %s, 'COMPLETED', %s)")
+
+        batch = BatchStatement()
+        batch.add(query_by_id, (tx_id_debit, sender_id, str(sender_id), str(recipient_id), amount, currency, now, now))
+        batch.add(query_by_user, (sender_id, now, tx_id_debit, str(sender_id), str(recipient_id), amount, currency, now))
+
+        db.execute(batch)
+        db.execute(f"INSERT INTO {KEYSPACE}.idempotency_keys (key, transaction_id) VALUES (%s, %s)", (uuid.UUID(idempotency_key), tx_id_debit))
+
+        LEDGER_P2P_TRANSFERS_TOTAL.inc()
+
+        # Devolvemos solo la transacción del remitente
+        tx_data = await get_transaction_by_id(db, tx_id_debit)
+        if not tx_data: raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "No se pudo recuperar la transacción final")
+        return schemas.Transaction(**tx_data)
+
+    except Exception as e:
+        logger.critical(f"¡FALLO CRÍTICO POST-SAGA! Tx {tx_id_debit} y {tx_id_credit} tuvieron éxito pero Cassandra falló: {e}", exc_info=True)
+        # No revertimos, ¡el dinero ya se movió! Esto requiere reconciliación manual.
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "La transferencia se completó pero falló al registrarse. Contacte a soporte.")
+
+
+
 # --- Endpoint de Salud y Métricas ---
 
 @app.get("/health", tags=["Monitoring"])
@@ -523,7 +724,7 @@ def health_check():
     db_status = "ok"
     try:
         if db_session:
-            # --- CORREGIDO: Usar una consulta CQL (Cassandra), no SQL ---
+            
             db_session.execute("SELECT now() FROM system.local", timeout=3.0) 
         else:
             db_status = "error - session not initialized"

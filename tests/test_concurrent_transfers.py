@@ -52,7 +52,7 @@ def transfer_thread(token: str, amount: float, destination: str, results: list, 
          results[index] = "ERROR"
          result_status = "ERROR"
          logger.error(f"Hilo {index}: Error inesperado en el hilo -> {e}", exc_info=True)
-    #print(f"Hilo {index} finalizado con estado: {result_status}") # Debug
+    
 
 
 # --- La Prueba Principal de Concurrencia ---

@@ -30,9 +30,9 @@ MONITORED_CONTAINERS = [
     "auth_service",
     "balance_service",
     "ledger_service",
-    "group_service", # Añadido group_service
-    "interbank_service", # Nombre corregido
-    "n8n" # También monitoreamos n8n
+    "group_service", 
+    "interbank_service", 
+    "n8n" 
 ]
 
 # --- Conexión Inicial a Docker ---
@@ -58,11 +58,11 @@ def check_containers():
         container = None # Resetear para cada contenedor
         try:
             container = docker_client.containers.get(container_name)
-            container_status = container.status # ej. 'running', 'exited', 'restarting'
+            container_status = container.status 
             
             # Obtenemos el estado de salud si el contenedor lo tiene definido.
             health_status = container.attrs.get("State", {}).get("Health", {}).get("Status")
-            # Puede ser None, 'starting', 'healthy', 'unhealthy'.
+            
 
             # Condición de fallo: No está corriendo O está explícitamente no saludable.
             is_unhealthy = container_status != "running" or health_status == "unhealthy"
@@ -76,8 +76,7 @@ def check_containers():
                 except Exception as restart_err:
                     logger.error(f"Error al intentar reiniciar '{container_name}': {restart_err}", exc_info=True)
                     send_alert(container_name, "fallo_reinicio_watchdog", str(restart_err))
-            # else: # Log opcional para contenedores saludables
-            #    logger.debug(f"✔️ Contenedor '{container_name}' está {container_status} (Salud: {health_status or 'OK'}).")
+            
 
         except docker.errors.NotFound:
             # El contenedor no existe según Docker.

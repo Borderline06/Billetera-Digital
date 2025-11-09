@@ -130,7 +130,7 @@ def test_group_creation(created_group, auth_headers, test_user_token):
     assert group_data["members"][0]["role"] == "leader", "El creador debe tener rol 'leader'"
     print(f"[Test] Creación de grupo verificada.")
 
-# --- ¡NUEVA PRUEBA! ---
+
 def test_invite_member(created_group, auth_headers, second_user_token):
     """
     Verifica que el líder del grupo puede invitar a un nuevo miembro.

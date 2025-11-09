@@ -98,14 +98,13 @@ def health_check():
     db_status = "ok"
     try:
         db = SessionLocal()
-        # Ejecuta una consulta simple para verificar la conexión
+        
         db.execute(text("SELECT 1"))
         db.close()
     except Exception as e:
         logger.error(f"Health check fallido - Error de BD: {e}", exc_info=True)
         db_status = "error"
-        # Devolver 503 si la BD no está disponible
-        # raise HTTPException(status_code=503, detail="Database connection error")
+        
 
     return {"status": "ok", "service": "balance_service", "database": db_status}
 
@@ -223,7 +222,7 @@ def debit_balance(update_in: schemas.BalanceUpdate, db: Session = Depends(get_db
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal server error during debit.")
 
 
-# ... (después del endpoint /balance/debit, y antes de @app.get("/health")) ...
+
 
 # --- ENDPOINTS DE BILLETERA GRUPAL (BDG) ---
 
@@ -283,14 +282,14 @@ def credit_group_balance(
         with db.begin():
             account = db.query(models.GroupAccount).filter(
                 models.GroupAccount.group_id == update_in.group_id
-            ).with_for_update().first() # ¡Bloqueo de fila!
+            ).with_for_update().first() 
 
             if not account:
                 logger.warning(f"Aporte fallido: Cuenta BDG no encontrada para group_id: {update_in.group_id}")
                 raise HTTPException(status.HTTP_404_NOT_FOUND, f"Cuenta de grupo (BDG) no encontrada.")
 
             account.balance += Decimal(str(update_in.amount))
-            db.commit() # Commit libera el bloqueo
+            db.commit() 
 
         db.refresh(account)
         logger.info(f"Aporte exitoso. Nuevo balance para group_id {account.group_id}: {account.balance}")
@@ -298,7 +297,7 @@ def credit_group_balance(
 
     except HTTPException:
          db.rollback()
-         raise # Relanza el 404
+         raise 
     except Exception as e:
         db.rollback()
         logger.error(f"Error interno al acreditar a grupo {update_in.group_id}: {e}", exc_info=True)
