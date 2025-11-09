@@ -156,6 +156,33 @@ def create_group(
         logger.error(f"Error interno al crear grupo '{group_in.name}': {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno del servidor al crear grupo.")
 
+@app.get("/groups/me", response_model=List[schemas.GroupResponse], tags=["Groups"])
+def get_my_groups(
+    x_user_id: int = Header(..., alias="X-User-ID"), 
+    db: Session = Depends(get_db)
+):
+    """
+    Obtiene la lista de grupos a los que pertenece el usuario autenticado.
+    """
+    requesting_user_id = x_user_id 
+    if not requesting_user_id:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "User ID no autenticado")
+
+    logger.info(f"Buscando grupos para user_id: {requesting_user_id}")
+
+    try:
+        groups = db.query(models.Group).options(
+            joinedload(models.Group.members)
+        ).join(
+            models.GroupMember, models.GroupMember.group_id == models.Group.id
+        ).filter(
+            models.GroupMember.user_id == requesting_user_id
+        ).all()
+
+        return groups
+    except Exception as e:
+        logger.error(f"Error al obtener grupos para user_id {requesting_user_id}: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al obtener grupos")
 
 @app.post("/groups/{group_id}/invite", response_model=schemas.GroupMemberResponse, status_code=status.HTTP_201_CREATED, tags=["Groups"])
 def invite_member(
@@ -211,34 +238,6 @@ def invite_member(
         db.rollback()
         logger.error(f"Error interno al añadir miembro al grupo {group_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al invitar al miembro.")
-
-@app.get("/groups/me", response_model=List[schemas.GroupResponse], tags=["Groups"])
-def get_my_groups(
-    x_user_id: int = Header(..., alias="X-User-ID"), 
-    db: Session = Depends(get_db)
-):
-    """
-    Obtiene la lista de grupos a los que pertenece el usuario autenticado.
-    """
-    requesting_user_id = x_user_id 
-    if not requesting_user_id:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "User ID no autenticado")
-
-    logger.info(f"Buscando grupos para user_id: {requesting_user_id}")
-
-    try:
-        groups = db.query(models.Group).options(
-            joinedload(models.Group.members)
-        ).join(
-            models.GroupMember, models.GroupMember.group_id == models.Group.id
-        ).filter(
-            models.GroupMember.user_id == requesting_user_id
-        ).all()
-
-        return groups
-    except Exception as e:
-        logger.error(f"Error al obtener grupos para user_id {requesting_user_id}: {e}", exc_info=True)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al obtener grupos")
 
 @app.get("/groups/{group_id}", response_model=schemas.GroupResponse, tags=["Groups"])
 def get_group_details(
