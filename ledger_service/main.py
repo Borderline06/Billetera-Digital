@@ -5,8 +5,10 @@ import httpx
 import uuid
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
+from collections import defaultdict
+from decimal import Decimal
 
 from fastapi import FastAPI, Depends, HTTPException, status, Header, Request, Response
 from cassandra.cluster import Session
@@ -577,9 +579,65 @@ async def get_my_transactions(
         logger.error(f"Error al obtener transacciones para user_id {x_user_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error al obtener historial de movimientos.")
 
+@app.get("/analytics/daily_balance/{user_id}", tags=["Analytics"])
+async def get_daily_balance(user_id: int, db: Session = Depends(get_db)):
+    """
+    Devuelve el saldo acumulado diario del usuario en los últimos 30 días.
+    Fuente: Cassandra (tabla transactions_by_user)
+    Ideal para gráficos de área (histórico de balance).
+    """
+    logger.info(f"Calculando saldo diario para user_id: {user_id}")
 
+    # --- Rango de 30 días atrás ---
+    now = datetime.now(timezone.utc)
+    thirty_days_ago = now - timedelta(days=30)
 
+    # --- Consulta a Cassandra ---
+    query = SimpleStatement(f"""
+        SELECT created_at, type, amount
+        FROM {KEYSPACE}.transactions_by_user
+        WHERE user_id = %s
+        AND created_at >= %s
+        ORDER BY created_at ASC
+    """)
 
+    try:
+        result_set = db.execute(query, (user_id, thirty_days_ago))
+
+        # --- Procesar movimientos ---
+        daily_balance = defaultdict(float)
+        running_balance = Decimal('0.0')
+
+        for row in result_set:
+            tx_date = row.created_at.date()
+
+            # Tipos de transacción que SUMAN
+            if row.type in ["DEPOSIT", "P2P_RECEIVED", "CONTRIBUTION_RECEIVED"]:
+                running_balance += row.amount
+
+            # Tipos de transacción que RESTAN
+            elif row.type in ["P2P_SENT", "CONTRIBUTION_SENT", "WITHDRAWAL"]:
+                running_balance -= row.amount
+
+            daily_balance[tx_date] = running_balance
+
+        # --- Completar días faltantes ---
+        data = []
+        balance = 0.0
+        for i in range(30, -1, -1):
+            day = (now - timedelta(days=i)).date()
+            if day in daily_balance:
+                balance = daily_balance[day]
+            data.append({
+                "date": day.isoformat(),
+                "balance": float(round(balance, 2))
+            })
+
+        return data
+
+    except Exception as e:
+        logger.error(f"Error al calcular balance diario para {user_id}: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error al calcular el balance diario.")
 
 @app.post("/transfer/p2p", response_model=schemas.Transaction, status_code=status.HTTP_201_CREATED, tags=["Transactions"])
 async def transfer_p2p(

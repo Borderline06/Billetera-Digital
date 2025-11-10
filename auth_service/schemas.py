@@ -7,6 +7,7 @@ from typing import Optional
 
 class UserCreate(BaseModel):
     """Schema para los datos requeridos al crear un nuevo usuario."""
+    name: str = Field(..., min_length=3, description="Nombre completo del usuario") 
     email: str
     password: str = Field(..., min_length=8, description="La contraseña debe tener al menos 8 caracteres")
     phone_number: str = Field(..., min_length=9, max_length=15)
@@ -14,7 +15,9 @@ class UserCreate(BaseModel):
 class UserResponse(BaseModel):
     """Schema para los datos devueltos tras la creación exitosa de un usuario (excluye contraseña)."""
     id: int
+    name: str
     email: str
+    phone_number: str | None = None
 
     # Configuración de Pydantic v2+ para permitir mapeo desde modelos ORM (SQLAlchemy)
     model_config = ConfigDict(from_attributes=True)

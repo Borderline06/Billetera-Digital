@@ -261,6 +261,14 @@ async def proxy_login(request: Request):
     logger.info("Proxying request to /auth/login")
     return await forward_request(request, f"{AUTH_URL}/login")
 
+# --- Endpoints Privados (Proxy para Auth) ---
+
+@app.get("/auth/me", tags=["Authentication"])
+async def proxy_get_my_profile(request: Request, user_id: int = Depends(get_current_user_id)):
+    """Obtiene los datos del usuario autenticado (proxy hacia auth_service)."""
+    logger.info(f"Proxying request to /users/{user_id}")
+    return await forward_request(request, f"{AUTH_URL}/users/{user_id}")
+
 # --- Endpoints Privados (Proxy para Balance) ---
 
 @app.get("/balance/me", tags=["Balance"])
@@ -316,6 +324,24 @@ async def proxy_get_my_transactions(request: Request, user_id: int = Depends(get
         pass_headers=["Authorization"]
     )
 
+
+@app.get("/ledger/analytics/daily_balance/me", tags=["Ledger Analytics"])
+async def proxy_get_my_daily_balance(request: Request, user_id: int = Depends(get_current_user_id)):
+    """
+    Obtiene el historial de balance diario del usuario autenticado (últimos 30 días).
+    Proxy hacia el Ledger Service.
+    """
+    logger.info(f"Proxying request to /ledger/analytics/daily_balance/me for user_id: {user_id}")
+
+    # Construimos la URL del servicio Ledger
+    target_url = f"{LEDGER_URL}/analytics/daily_balance/{user_id}"
+
+    # Reenviamos la solicitud al Ledger Service
+    return await forward_request(
+        request,
+        target_url,
+        pass_headers=["Authorization"]
+    )
 # --- Endpoints Privados (Proxy para Group) ---
 
 @app.post("/groups", status_code=status.HTTP_201_CREATED, tags=["Groups"])
