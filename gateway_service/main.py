@@ -372,15 +372,47 @@ async def proxy_get_my_groups(request: Request, user_id: int = Depends(get_curre
     )
 
 @app.post("/groups/{group_id}/invite", tags=["Groups"])
-async def proxy_invite_member(group_id: int, request: Request, user_id: int = Depends(get_current_user_id)):
-    """Reenvía la solicitud de invitación de miembro al servicio de grupos."""
-    logger.info(f"Proxying request to /groups/{group_id}/invite for user_id: {user_id}")
-    return await forward_request(
-        request, 
-        f"{GROUP_URL}/groups/{group_id}/invite", 
-        inject_user_id=False, 
-        pass_headers=["Authorization"]
-    )
+async def proxy_invite_member(
+    group_id: int,
+    request: Request,
+    user_id: int = Depends(get_current_user_id)
+):
+    logger.info(f"Procesando invitación en gateway. group_id={group_id}, invited_by={user_id}")
+
+    body = await request.json()
+    phone = body.get("phone_number")
+
+    if not phone:
+        raise HTTPException(400, "phone_number es requerido")
+
+    # 1. Obtener USER_ID por teléfono
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{AUTH_URL}/users/by-phone/{phone}")
+
+        if resp.status_code != 200:
+            detail = resp.json().get("detail", "Usuario no encontrado")
+            raise HTTPException(resp.status_code, detail)
+
+        invited_user_id = resp.json()["id"]
+
+    # 2. Reenviar al servicio de grupos
+    new_body = {
+        "user_id_to_invite": invited_user_id
+    }
+
+    async with httpx.AsyncClient() as client:
+        forward_resp = await client.post(
+            f"{GROUP_URL}/groups/{group_id}/invite",
+            json=new_body,
+            headers={
+                "Authorization": request.headers.get("Authorization"),
+                "X-User-ID": str(user_id)  # ← NECESARIO
+            }
+        )
+
+    return forward_resp.json()
+
+
 
 @app.get("/groups/{group_id}", tags=["Groups"])
 async def proxy_get_group(group_id: int, request: Request, user_id: int = Depends(get_current_user_id)):
