@@ -14,7 +14,7 @@ from fastapi.responses import Response, JSONResponse
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 from db import engine, Base, get_db, SessionLocal
-from models import Group, GroupMember, GroupRole
+from models import Group, GroupMember, GroupRole, GroupMemberStatus
 from typing import Optional, List
 from dotenv import load_dotenv
 load_dotenv()
@@ -113,7 +113,8 @@ def create_group(
         leader_member = models.GroupMember(
             group_id=new_group.id,
             user_id=leader_user_id,
-            role=models.GroupRole.LEADER
+            role=models.GroupRole.LEADER,
+            status=models.GroupMemberStatus.ACTIVE
         )
         db.add(leader_member)
 
@@ -171,18 +172,56 @@ def get_my_groups(
     logger.info(f"Buscando grupos para user_id: {requesting_user_id}")
 
     try:
-        groups = db.query(models.Group).options(
-            joinedload(models.Group.members)
-        ).join(
-            models.GroupMember, models.GroupMember.group_id == models.Group.id
+        groups = db.query(models.Group).join(
+        models.GroupMember
         ).filter(
             models.GroupMember.user_id == requesting_user_id
         ).all()
-
         return groups
     except Exception as e:
         logger.error(f"Error al obtener grupos para user_id {requesting_user_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al obtener grupos")
+    
+
+@app.post("/groups/me/accept/{group_id}", response_model=schemas.GroupMemberResponse, tags=["Groups"])
+def accept_group_invitation(
+    group_id: int,
+    x_user_id: int = Header(..., alias="X-User-ID"), # ID del usuario (el invitado)
+    db: Session = Depends(get_db)
+):
+    """
+    Permite al usuario autenticado (X-User-ID) aceptar una invitación
+    pendiente a un grupo.
+    """
+    invited_user_id = x_user_id
+    logger.info(f"Usuario {invited_user_id} intentando aceptar invitación al grupo {group_id}")
+
+    # 1. Buscar la membresía pendiente
+    membership = db.query(models.GroupMember).filter(
+        models.GroupMember.group_id == group_id,
+        models.GroupMember.user_id == invited_user_id
+    ).first()
+
+    if not membership:
+        logger.warning(f"Intento de aceptar invitación inexistente al grupo {group_id} por user {invited_user_id}")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Invitación no encontrada.")
+
+    if membership.status == models.GroupMemberStatus.ACTIVE:
+        logger.warning(f"Usuario {invited_user_id} intentó aceptar invitación al grupo {group_id} pero ya estaba activo.")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Ya eres miembro activo de este grupo.")
+
+    # 2. Actualizar el estado a ACTIVO
+    try:
+        membership.status = models.GroupMemberStatus.ACTIVE
+        db.commit()
+        db.refresh(membership)
+        logger.info(f"Usuario {invited_user_id} aceptó exitosamente la invitación al grupo {group_id}.")
+        return membership
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error al actualizar estado de membresía para user {invited_user_id} en grupo {group_id}: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error al aceptar la invitación.")
+
 
 @app.post("/groups/{group_id}/invite", response_model=schemas.GroupMemberResponse, status_code=status.HTTP_201_CREATED, tags=["Groups"])
 def invite_member(
@@ -224,7 +263,8 @@ def invite_member(
     new_member = models.GroupMember(
         group_id=group_id,
         user_id=user_to_invite_id,
-        role=models.GroupRole.MEMBER
+        role=models.GroupRole.MEMBER,
+        status=models.GroupMemberStatus.PENDING
     )
 
     try:
@@ -271,4 +311,4 @@ def get_group_details(
     logger.info(f"Devolviendo detalles del grupo {group_id} a user_id {requesting_user_id}")
     return group
 
-
+# ... (después de la función get_group_details)

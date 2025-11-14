@@ -66,10 +66,6 @@ Base = declarative_base()
 
 
 def get_db():
-    """
-    Generador de dependencia de FastAPI para obtener una sesión de base de datos.
-    Maneja commits, rollbacks y errores de forma centralizada.
-    """
     if SessionLocal is None:
         logger.error("La fábrica de sesiones de base de datos no está inicializada.")
         raise HTTPException(status_code=503, detail="Servicio de base de datos no disponible.")
@@ -77,31 +73,21 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
-
-    
     except RequestValidationError as validation_exc:
-        
         logger.warning(f"Error de validación: {validation_exc.errors()}")
         db.rollback()
         raise validation_exc
-
     except HTTPException as http_exc:
-        
         db.rollback()
         logger.warning(f"Error HTTP controlado: {http_exc.detail}")
-        raise http_exc 
-
+        raise http_exc
     except exc.SQLAlchemyError as e:
-        
         db.rollback()
         logger.error(f"Error de base de datos durante la petición: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Error interno de base de datos.")
-
     except Exception as e:
-        
          db.rollback() 
          logger.error(f"Error inesperado (no-HTTP) durante la petición: {e}", exc_info=True)
          raise HTTPException(status_code=500, detail="Error interno del servidor.")
-   
     finally:
-        db.close() 
+        db.close()

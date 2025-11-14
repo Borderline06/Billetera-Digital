@@ -5,7 +5,7 @@
 from pydantic import BaseModel, Field, ConfigDict
 from datetime import datetime
 from typing import Optional, List
-from models import GroupRole # ¡La importación clave!
+from models import GroupRole, GroupMemberStatus # ¡La importación clave!
 
 # --- Schemas de Entrada (Input) ---
 
@@ -31,18 +31,17 @@ class GroupMemberResponse(BaseModel):
     user_id: int
     role: GroupRole # Muestra el rol ('leader' o 'member')
     group_id: int  # <-- El campo que faltaba en la definición duplicada
+    status: GroupMemberStatus
 
     # Configuración Pydantic v2+ para mapeo desde modelos ORM
     model_config = ConfigDict(from_attributes=True)
 
 class GroupResponse(BaseModel):
-    """Schema para la respuesta al obtener detalles de un grupo."""
+    """Schema para mostrar un grupo completo."""
     id: int
     name: str
     leader_user_id: int
-
-    # Ahora que GroupMemberResponse es correcto y único, esto funcionará.
+    created_at: datetime # <-- ¡AÑADE ESTA LÍNEA!
     members: List[GroupMemberResponse] = []
 
-    # Configuración Pydantic v2+ para mapeo desde modelos ORM
     model_config = ConfigDict(from_attributes=True)

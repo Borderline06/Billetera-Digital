@@ -201,11 +201,13 @@ def debit_balance(update_in: schemas.BalanceUpdate, db: Session = Depends(get_db
         if not account:
             logger.warning(f"Débito fallido: Cuenta no encontrada para user_id: {update_in.user_id}")
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"Account for user_id {update_in.user_id} not found.")
-
+        
+        # --- ¡¡¡AÑADE ESTE BLOQUE DE SEGURIDAD!!! ---
         # Doble verificación de fondos DENTRO de la transacción bloqueada
-        if account.balance < update_in.amount:
+        if account.balance < float(update_in.amount):
             logger.warning(f"Débito fallido: Fondos insuficientes para user_id: {update_in.user_id} (Saldo: {account.balance}, Solicitado: {update_in.amount})")
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Insufficient funds at the time of debit.")
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Insufficient funds.")
+        # --- FIN DEL BLOQUE DE SEGURIDAD ---
 
         account.balance -= float(update_in.amount)
         db.commit()
