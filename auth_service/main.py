@@ -198,9 +198,24 @@ def login(db: Session = Depends(get_db), form_data: OAuth2PasswordRequestForm = 
         )
 
   
-    access_token = create_access_token(data={"sub": str(user.id)})
+        # Preparamos el payload del token (¡EL ESTÁNDAR!)
+    # El 'sub' (subject) es el ID del usuario.
+    token_data = {
+        "sub": str(user.id),
+        "name": user.name # Añadimos el nombre para el frontend
+    }
+
+    access_token = create_access_token(data=token_data)
     logger.info(f"Login successful for user_id: {user.id}")
-    return {"access_token": access_token, "token_type": "bearer"}
+
+    # ¡Devolvemos el objeto COMPLETO que el schema espera!
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer",
+        "user_id": user.id,
+        "name": user.name,
+        "email": user.email
+    }
 
 @app.get("/users/{user_id}", response_model=schemas.UserResponse, tags=["Users"])
 async def get_user_by_id(user_id: int, db: Session = Depends(get_db)):
@@ -235,14 +250,16 @@ def verify(token: str):
     Usado por el API Gateway.
     """
     payload = decode_token(token)
-    if payload is None:
-        logger.warning("Intento de verificación con token inválido o expirado.")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-        )
-    
-    return payload
+    if payload is None or "sub" not in payload: # Doble verificación
+     logger.warning("Intento de verificación con token inválido, expirado o sin 'sub'.")
+     raise HTTPException(
+         status_code=status.HTTP_401_UNAUTHORIZED,
+         detail="Invalid or expired token",
+     )
+
+    # Devolvemos el payload que SÍ coincide con schemas.TokenPayload
+    # (El gateway_service ahora leerá 'sub' sin problemas)
+    return {"sub": payload.get("sub"), "exp": payload.get("exp"), "name": payload.get("name")}
 
 
 

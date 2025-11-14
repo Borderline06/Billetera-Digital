@@ -1,7 +1,7 @@
 """Define los modelos de las tablas 'groups' y 'group_members' usando SQLAlchemy ORM."""
 
 import enum
-from sqlalchemy import Column, Integer, String, ForeignKey, Enum as SQLEnum
+from sqlalchemy import Column, Integer, String, ForeignKey, Enum as SQLEnum , DateTime, func
 from sqlalchemy.orm import relationship
 # Importación absoluta desde el módulo db.py del mismo directorio
 from db import Base
@@ -27,10 +27,16 @@ class Group(Base):
 
     # Relación uno-a-muchos con GroupMember.
     # Permite acceder a group.members para obtener la lista de miembros.
-    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
     members = relationship("GroupMember", back_populates="group")
 
 # Reemplaza la clase GroupMember con esto:
+class GroupMemberStatus(str, enum.Enum):
+    """Define el estado de la membresía de un usuario en un grupo."""
+    PENDING = "pending"
+    ACTIVE = "active"
+    # (En el futuro: REJECTED, BANNED, etc.)
+    
 class GroupMember(Base):
     """
     Modelo SQLAlchemy que representa la tabla 'group_members'.
@@ -46,4 +52,7 @@ class GroupMember(Base):
 
     role = Column(SQLEnum(GroupRole), nullable=False, default=GroupRole.MEMBER)
 
+    status = Column(SQLEnum(GroupMemberStatus), nullable=False, default=GroupMemberStatus.PENDING)
+
     group = relationship("Group", back_populates="members")
+

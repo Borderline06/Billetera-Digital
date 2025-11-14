@@ -118,7 +118,7 @@ async def combined_middleware(request: Request, call_next):
                     raise HTTPException(verify_response.status_code, detail)
 
                 token_payload = verify_response.json()
-                user_id_str = token_payload.get("sub") or token_payload.get("user_id")
+                user_id_str = token_payload.get("sub")
                 if user_id_str:
                     user_id = int(user_id_str)
                     request.state.user_id = user_id # Inyectamos user_id para los endpoints
