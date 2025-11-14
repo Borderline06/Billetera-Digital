@@ -156,7 +156,6 @@ def create_group(
         logger.error(f"Error interno al crear grupo '{group_in.name}': {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno del servidor al crear grupo.")
 
-
 @app.get("/groups/me", response_model=List[schemas.GroupResponse], tags=["Groups"])
 def get_my_groups(
     x_user_id: int = Header(..., alias="X-User-ID"), 
@@ -239,7 +238,6 @@ def invite_member(
         db.rollback()
         logger.error(f"Error interno al añadir miembro al grupo {group_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al invitar al miembro.")
-
 
 @app.get("/groups/{group_id}", response_model=schemas.GroupResponse, tags=["Groups"])
 def get_group_details(

@@ -8,6 +8,7 @@ from passlib.context import CryptContext
 from jose import JWTError, jwt
 from dotenv import load_dotenv
 from typing import Dict, Optional
+from db import get_db
 
 # Carga variables de entorno desde .env
 load_dotenv()

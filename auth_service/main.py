@@ -2,7 +2,7 @@ import logging
 import time
 import httpx
 from fastapi import FastAPI, Depends, HTTPException, status, Request
-from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from fastapi.responses import Response
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from sqlalchemy.orm import Session
@@ -20,6 +20,8 @@ from utils import (
     decode_token,
     BALANCE_SERVICE_URL,
 )
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
 # Configura logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -122,7 +124,13 @@ async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
     
 
     hashed_password = get_password_hash(user.password)
-    new_user = User(email=user.email, hashed_password=hashed_password,phone_number=user.phone_number)
+
+    new_user = User(
+        name=user.name,        
+        email=user.email,
+        hashed_password=hashed_password,
+        phone_number=user.phone_number
+    )
 
     try:
         db.add(new_user)
@@ -164,7 +172,12 @@ async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
                      detail = f"Balance Service error: Status {status_code}"
             raise HTTPException(status_code=status_code, detail=detail)
 
-    return {"id": new_user.id, "email": new_user.email}
+    return {
+        "id": new_user.id,
+        "name": new_user.name,
+        "email": new_user.email,
+        "phone_number": new_user.phone_number
+    }
 
 
 @app.post("/login", response_model=schemas.Token, tags=["Authentication"])
@@ -188,6 +201,31 @@ def login(db: Session = Depends(get_db), form_data: OAuth2PasswordRequestForm = 
     access_token = create_access_token(data={"sub": str(user.id)})
     logger.info(f"Login successful for user_id: {user.id}")
     return {"access_token": access_token, "token_type": "bearer"}
+
+@app.get("/users/{user_id}", response_model=schemas.UserResponse, tags=["Users"])
+async def get_user_by_id(user_id: int, db: Session = Depends(get_db)):
+    """
+    Retorna la información del usuario por su ID.
+    Usado internamente por el API Gateway al llamar /auth/me.
+    """
+    logger.info(f"Solicitud de datos para usuario con ID {user_id}")
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        logger.warning(f"Usuario con ID {user_id} no encontrado.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Usuario no encontrado.",
+        )
+
+    logger.info(f"Usuario encontrado: {user.email} (ID: {user.id})")
+
+    return {
+        "id": user.id,
+        "name": user.name,
+        "email": user.email,
+        "phone_number": user.phone_number
+    }
 
 
 @app.get("/verify", response_model=schemas.TokenPayload, tags=["Internal"])
