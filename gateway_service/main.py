@@ -332,6 +332,20 @@ async def proxy_create_group(request: Request, user_id: int = Depends(get_curren
         pass_headers=["Authorization"]
     )
 
+@app.get("/groups/me", tags=["Groups"])
+async def proxy_get_my_groups(request: Request, user_id: int = Depends(get_current_user_id)):
+    """Obtiene los grupos del usuario autenticado."""
+    logger.info(f"Proxying request to /groups/me for user_id: {user_id}")
+
+   
+    return await forward_request(
+        request, 
+        f"{GROUP_URL}/groups/me",
+        inject_user_id=False, 
+        pass_headers=["Authorization"]
+    )
+
+
 @app.post("/groups/{group_id}/invite", tags=["Groups"])
 async def proxy_invite_member(group_id: int, request: Request, user_id: int = Depends(get_current_user_id)):
     """Reenvía la solicitud de invitación de miembro al servicio de grupos."""
@@ -355,19 +369,6 @@ async def proxy_get_group(group_id: int, request: Request, user_id: int = Depend
     )
 
 
-
-@app.get("/groups/me", tags=["Groups"])
-async def proxy_get_my_groups(request: Request, user_id: int = Depends(get_current_user_id)):
-    """Obtiene los grupos del usuario autenticado."""
-    logger.info(f"Proxying request to /groups/me for user_id: {user_id}")
-
-   
-    return await forward_request(
-        request, 
-        f"{GROUP_URL}/groups/me",
-        inject_user_id=False, 
-        pass_headers=["Authorization"]
-    )
 
 # --- Manejador de Cierre ---
 @app.on_event("shutdown")
