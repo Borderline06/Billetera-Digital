@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import text
 from fastapi.responses import Response, JSONResponse
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from decimal import Decimal
 
 from db import engine, Base, get_db, SessionLocal
 from models import Group, GroupMember, GroupRole, GroupMemberStatus
@@ -332,6 +333,140 @@ def reject_group_invitation(
         db.rollback()
         logger.error(f"Error al eliminar membresía 'pending' para user {rejecting_user_id} en grupo {group_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error al rechazar la invitación.")
+
+
+
+# ... (después de 'reject_group_invitation')
+
+@app.post("/groups/{group_id}/member_balance", response_model=schemas.GroupMemberResponse, tags=["Groups"])
+def update_member_internal_balance(
+    group_id: int,
+    req: schemas.InternalBalanceUpdate,
+   
+    db: Session = Depends(get_db)
+):
+    """
+    Actualiza el 'internal_balance' de un miembro (SUMA en aportes, RESTA en retiros).
+    Llamado SOLAMENTE por el ledger_service durante una saga.
+    """
+    # (En un futuro, verificaríamos que quien llama es el ledger_service)
+    logger.info(f"Actualizando internal_balance para user {req.user_id_to_update} en grupo {group_id} por un monto de {req.amount}")
+
+    try:
+        with db.begin():
+            membership = db.query(models.GroupMember).filter(
+                models.GroupMember.group_id == group_id,
+                models.GroupMember.user_id == req.user_id_to_update
+            ).with_for_update().first()
+
+            if not membership:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Membresía no encontrada para actualizar saldo interno.")
+
+            membership.internal_balance += Decimal(str(req.amount))
+            db.commit()
+
+        db.refresh(membership)
+        return membership
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error al actualizar internal_balance: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error al actualizar saldo interno.")
+
+
+# ... (después de 'update_member_internal_balance')
+
+@app.delete("/groups/{group_id}/kick/{user_id_to_kick}", status_code=status.HTTP_204_NO_CONTENT, tags=["Groups"])
+def kick_member(
+    group_id: int,
+    user_id_to_kick: int,
+    x_user_id: int = Header(..., alias="X-User-ID"), # ID del LÍDER
+    db: Session = Depends(get_db)
+):
+    """
+    Permite al líder del grupo (X-User-ID) eliminar a otro miembro.
+    RESTRICCIÓN: No se puede eliminar a un miembro con deuda (saldo interno < 0).
+    """
+    leader_user_id = x_user_id
+    logger.info(f"Líder {leader_user_id} intentando eliminar a user {user_id_to_kick} del grupo {group_id}")
+
+    # 1. Verificar que quien llama es el líder
+    group = db.query(models.Group).filter(models.Group.id == group_id).first()
+    if not group:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Grupo no encontrado.")
+    if group.leader_user_id != leader_user_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Solo el líder del grupo puede eliminar miembros.")
+
+    # 2. No puedes eliminarte a ti mismo (el líder)
+    if group.leader_user_id == user_id_to_kick:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "El líder no puede eliminarse a sí mismo.")
+
+    # 3. Encontrar al miembro que se va a eliminar
+    membership_to_kick = db.query(models.GroupMember).filter(
+        models.GroupMember.group_id == group_id,
+        models.GroupMember.user_id == user_id_to_kick
+    ).first()
+
+    if not membership_to_kick:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Miembro a eliminar no encontrado en este grupo.")
+
+    # 4. ¡¡LA RESTRICCIÓN DE LA JUNTA!!
+    if membership_to_kick.internal_balance < Decimal('0.00'):
+        logger.warning(f"Líder {leader_user_id} no puede eliminar a user {user_id_to_kick}, tiene deuda.")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"No se puede eliminar al miembro: tiene un saldo interno negativo (debe: {membership_to_kick.internal_balance}).")
+
+    # 5. Todo en orden, eliminar al miembro
+    try:
+        db.delete(membership_to_kick)
+        db.commit()
+        logger.info(f"Miembro {user_id_to_kick} eliminado exitosamente del grupo {group_id}.")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error al eliminar miembro: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al eliminar miembro.")
+
+
+@app.delete("/groups/me/leave/{group_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Groups"])
+def leave_group(
+    group_id: int,
+    x_user_id: int = Header(..., alias="X-User-ID"), # ID del Miembro
+    db: Session = Depends(get_db)
+):
+    """
+    Permite a un miembro (X-User-ID) salirse de un grupo.
+    RESTRICCIÓN: No puede salirse si es el líder o si tiene deuda.
+    """
+    member_user_id = x_user_id
+    logger.info(f"Miembro {member_user_id} intentando salirse del grupo {group_id}")
+
+    # 1. Encontrar la membresía
+    membership = db.query(models.GroupMember).filter(
+        models.GroupMember.group_id == group_id,
+        models.GroupMember.user_id == member_user_id
+    ).first()
+
+    if not membership:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No eres miembro de este grupo.")
+
+    # 2. Restricción: El líder no puede "salirse"
+    if membership.role == models.GroupRole.LEADER:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "El líder no puede abandonar el grupo. Debe eliminarlo.")
+
+    # 3. ¡¡LA RESTRICCIÓN DE LA JUNTA!!
+    if membership.internal_balance < Decimal('0.00'):
+        logger.warning(f"Miembro {member_user_id} no puede salirse del grupo {group_id}, tiene deuda.")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"No puedes salir del grupo: tu saldo interno es negativo (debes: {membership.internal_balance}).")
+
+    # 4. Todo en orden, salirse del grupo
+    try:
+        db.delete(membership)
+        db.commit()
+        logger.info(f"Miembro {member_user_id} se salió exitosamente del grupo {group_id}.")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error al salirse de grupo: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al salirse del grupo.")
 
 
 # REEMPLAZA la función 'invite_member' entera con esto:

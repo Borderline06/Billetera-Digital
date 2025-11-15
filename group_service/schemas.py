@@ -46,3 +46,7 @@ class GroupResponse(BaseModel):
     members: List[GroupMemberResponse] = []
 
     model_config = ConfigDict(from_attributes=True)
+
+class InternalBalanceUpdate(BaseModel):
+    user_id_to_update: int
+    amount: float # Puede ser positivo (aporte) o negativo (retiro)

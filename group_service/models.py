@@ -1,8 +1,9 @@
 """Define los modelos de las tablas 'groups' y 'group_members' usando SQLAlchemy ORM."""
 
 import enum
-from sqlalchemy import Column, Integer, String, ForeignKey, Enum as SQLEnum , DateTime, func
+from sqlalchemy import Column, Integer, String, ForeignKey, Enum as SQLEnum , DateTime, func, Numeric
 from sqlalchemy.orm import relationship
+from decimal import Decimal
 # Importación absoluta desde el módulo db.py del mismo directorio
 from db import Base
 
@@ -53,6 +54,8 @@ class GroupMember(Base):
     role = Column(SQLEnum(GroupRole), nullable=False, default=GroupRole.MEMBER)
 
     status = Column(SQLEnum(GroupMemberStatus), nullable=False, default=GroupMemberStatus.PENDING)
+
+    internal_balance = Column(Numeric(10, 2), nullable=False, default=Decimal('0.00'))
 
     group = relationship("Group", back_populates="members")
 
