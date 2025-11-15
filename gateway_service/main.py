@@ -5,6 +5,7 @@ import httpx
 import logging
 import time
 import json
+from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Request, HTTPException, status, Header, Depends
 from fastapi.responses import JSONResponse, Response
@@ -64,8 +65,28 @@ PUBLIC_ROUTES = [
     "/health",
     "/metrics",
     "/docs",
-    "/openapi.json"
+    "/openapi.json",
+    "/api/v1/inbound-transfer"
 ]
+
+
+
+# ... (cerca de PUBLIC_ROUTES) ...
+API_KEY_NAME = "X-API-Key"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False) # auto_error=False para manejo manual
+PARTNER_API_KEY = os.getenv("PARTNER_API_KEY")
+
+async def get_api_key(api_key: str = Depends(api_key_header)):
+    if not PARTNER_API_KEY:
+         logger.error("PARTNER_API_KEY no está configurada en el Gateway .env")
+         raise HTTPException(status_code=500, detail="Error de configuración interna del servidor.")
+    if api_key != PARTNER_API_KEY:
+        logger.warning(f"Intento de llamada a API de Partner con llave incorrecta: {api_key}")
+        raise HTTPException(status_code=403, detail="API Key inválida o faltante")
+    return api_key
+
+
+
 
 # --- Cliente HTTP Asíncrono Reutilizable ---
 client = httpx.AsyncClient(timeout=15.0)
@@ -324,6 +345,25 @@ async def proxy_get_my_transactions(request: Request, user_id: int = Depends(get
         pass_headers=["Authorization"]
     )
 
+# ... (después de 'proxy_get_my_transactions')
+
+@app.get("/ledger/transactions/group/{group_id}", tags=["Ledger"])
+async def proxy_get_group_transactions(
+    group_id: int, 
+    request: Request, 
+    user_id: int = Depends(get_current_user_id)
+):
+    """Obtiene el historial de movimientos de un grupo (BDG)."""
+    logger.info(f"Proxying request to /ledger/transactions/group/{group_id} for user_id: {user_id}")
+
+    # (El X-User-ID se añade automáticamente, el ledger_service lo usará para seguridad)
+    return await forward_request(
+        request, 
+        f"{LEDGER_URL}/transactions/group/{group_id}",
+        inject_user_id=False,
+        pass_headers=["Authorization"]
+    )
+
 
 @app.get("/ledger/analytics/daily_balance/me", tags=["Ledger Analytics"])
 async def proxy_get_my_daily_balance(request: Request, user_id: int = Depends(get_current_user_id)):
@@ -371,6 +411,46 @@ async def proxy_get_my_groups(request: Request, user_id: int = Depends(get_curre
         pass_headers=["Authorization"]
     )
 
+# ... (después de la función proxy_get_my_groups) ...
+
+@app.post("/groups/me/accept/{group_id}", tags=["Groups"])
+async def proxy_accept_invite(
+    group_id: int, 
+    request: Request, 
+    user_id: int = Depends(get_current_user_id)
+):
+    """Proxy para que un usuario acepte una invitación a un grupo."""
+    logger.info(f"Proxying request to /groups/me/accept/{group_id} for user_id: {user_id}")
+
+    # Esta llamada necesita el X-User-ID (que 'forward_request' añade)
+    # pero no tiene payload (inject_user_id=False).
+    return await forward_request(
+        request, 
+        f"{GROUP_URL}/groups/me/accept/{group_id}",
+        inject_user_id=False,
+        pass_headers=["Authorization"]
+    )
+
+# ... (después de la función proxy_accept_invite) ...
+
+@app.delete("/groups/me/reject/{group_id}", tags=["Groups"])
+async def proxy_reject_invite(
+    group_id: int, 
+    request: Request, 
+    user_id: int = Depends(get_current_user_id)
+):
+    """Proxy para que un usuario rechace una invitación a un grupo."""
+    logger.info(f"Proxying request to /groups/me/reject/{group_id} for user_id: {user_id}")
+
+    return await forward_request(
+        request, 
+        f"{GROUP_URL}/groups/me/reject/{group_id}",
+        inject_user_id=False,
+        pass_headers=["Authorization"]
+    )
+
+
+
 @app.post("/groups/{group_id}/invite", tags=["Groups"])
 async def proxy_invite_member(group_id: int, request: Request, user_id: int = Depends(get_current_user_id)):
     """Reenvía la solicitud de invitación de miembro al servicio de grupos."""
@@ -392,6 +472,54 @@ async def proxy_get_group(group_id: int, request: Request, user_id: int = Depend
         inject_user_id=False, 
         pass_headers=["Authorization"]
     )
+
+# ... (después de la función proxy_get_my_groups) ...
+
+@app.get("/group_balance/{group_id}", tags=["Groups", "Balance"])
+async def proxy_get_group_balance(
+    group_id: int, 
+    request: Request, 
+    user_id: int = Depends(get_current_user_id)
+):
+    """
+    Obtiene el saldo de una cuenta de grupo (BDG).
+    Proxy hacia balance_service.
+    """
+    logger.info(f"Proxying request to /group_balance/{group_id} for user_id: {user_id}")
+
+    # Esta llamada necesita el X-User-ID (que 'forward_request' añade)
+    # para que balance_service pueda (en el futuro) verificar si eres miembro.
+    return await forward_request(
+        request, 
+        f"{BALANCE_URL}/group_balance/{group_id}",
+        inject_user_id=False,
+        pass_headers=["Authorization"]
+    )
+
+
+# ... (después de la sección de Grupos) ...
+
+# --- API Externa v1 (Para Partners como Vercel) ---
+
+@app.post("/api/v1/inbound-transfer", tags=["Partner API"])
+async def partner_inbound_transfer(
+    request: Request,
+    api_key: str = Depends(get_api_key) # ¡Seguridad!
+):
+    """
+    Punto de entrada público para que partners (ej. Otro Grupo) 
+    depositen dinero a un usuario de Pixel Money via número de celular.
+    """
+    logger.info(f"Recibida llamada de Partner API a /api/v1/inbound-transfer")
+
+    return await forward_request(
+        request, 
+        f"{LEDGER_URL}/transfers/inbound",
+        inject_user_id=False,
+        pass_headers=[] # No pasamos ningún header del partner
+    )
+
+
 
 
 # --- Manejador de Cierre ---

@@ -1,130 +1,121 @@
-"""Módulo para la conexión y configuración del schema en la base de datos Cassandra."""
+# ledger_service/cassandra_db.py (Versión Limpia y Corregida)
 
 import os
 import logging
 import time
-from typing import Optional 
-
 from cassandra.cluster import Cluster, Session
+from cassandra.auth import PlainTextAuthProvider
 from cassandra.policies import DCAwareRoundRobinPolicy
-from dotenv import load_dotenv
+from cassandra.query import SimpleStatement
 
-# Carga variables de entorno
-load_dotenv()
-
-# Configuración del logger
+# Configura logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Lee la configuración de Cassandra desde el entorno
-CASSANDRA_HOST = os.getenv("CASSANDRA_HOST", "cassandra1") # Nodo(s) semilla
-KEYSPACE = "wallet_ledger" # Nombre de nuestro espacio de claves (base de datos)
+# Lee la configuración de Cassandra desde las variables de entorno
+CASSANDRA_HOSTS = os.getenv("CASSANDRA_HOSTS", "cassandra1").split(',')
+CASSANDRA_PORT = int(os.getenv("CASSANDRA_PORT", 9042))
+CASSANDRA_USER = os.getenv("CASSANDRA_USER")
+CASSANDRA_PASS = os.getenv("CASSANDRA_PASS")
+CASSANDRA_DATACENTER = os.getenv("CASSANDRA_DATACENTER", "dc1")
+KEYSPACE = os.getenv("CASSANDRA_KEYSPACE", "wallet_ledger")
 
-REPLICATION_FACTOR = int(os.getenv("CASSANDRA_REPLICATION_FACTOR", 1))
+def get_cassandra_session() -> Session:
+    """
+    Establece y devuelve una conexión (sesión) con el cluster de Cassandra.
+    Reintenta la conexión varias veces antes de fallar.
+    """
+    auth_provider = None
+    if CASSANDRA_USER and CASSANDRA_PASS:
+        auth_provider = PlainTextAuthProvider(username=CASSANDRA_USER, password=CASSANDRA_PASS)
 
-def get_cassandra_session() -> Optional[Session]:
-    """
-    Establece conexión con el clúster de Cassandra y devuelve un objeto Session.
-    Implementa una política de reintentos robusta.
-    """
+    cluster = Cluster(
+        contact_points=CASSANDRA_HOSTS,
+        port=CASSANDRA_PORT,
+        auth_provider=auth_provider,
+        protocol_version=4
+    )
+
+    session = None
     attempts = 0
-    max_attempts = 30 # 30 intentos
-    wait_time = 10    # 10 segundos (Total: 5 minutos de espera)
-
-    cluster: Optional[Cluster] = None 
+    max_attempts = 30
+    retry_delay = 5 # segundos
 
     while attempts < max_attempts:
+        attempts += 1
         try:
-            # 1. Crear un NUEVO objeto Cluster en CADA intento
-            cluster = Cluster(
-                [CASSANDRA_HOST],
-                load_balancing_policy=DCAwareRoundRobinPolicy(local_dc='datacenter1'),
-                port=9042,
-                # Añadimos un timeout de conexión más corto para fallar rápido
-                connect_timeout=5 
-            )
-
-            # 2. Intentar conectar
+            logger.info(f"Intentando conectar a Cassandra (Intento {attempts}/{max_attempts})...")
             session = cluster.connect()
-
             logger.info("Conexión a Cassandra establecida exitosamente.")
-            return session 
-
+            return session
         except Exception as e:
-            attempts += 1
-            logger.warning(f"Esperando a Cassandra... Intento {attempts}/{max_attempts}. Error: {e}")
+            logger.warning(f"Fallo al conectar a Cassandra: {e}. Reintentando en {retry_delay}s...")
+            time.sleep(retry_delay)
 
-            
-            # Cerramos el cluster SÓLO SI llegó a crearse antes de fallar
-            if cluster:
-                 cluster.shutdown()
-
-            if attempts < max_attempts:
-                time.sleep(wait_time)
-
-    logger.error("No se pudo conectar a Cassandra después de %d intentos.", max_attempts)
+    logger.error(f"Error fatal: No se pudo conectar a Cassandra después de {max_attempts} intentos.")
     return None
 
 def create_keyspace_and_tables(session: Session):
     """
-    Crea el keyspace y las tablas necesarias en Cassandra si no existen.
-    Esta función debe ejecutarse al inicio del servicio.
-
-    Args:
-        session: La sesión activa de Cassandra.
+    Crea el Keyspace y las tablas necesarias si no existen.
+    Esta función debe ser idempotente.
     """
+    if not session:
+        logger.error("No hay sesión de Cassandra para crear el schema.")
+        return
+
     try:
         # --- 1. Crear Keyspace ---
-        # SimpleStrategy es adecuado para un solo datacenter.
-        logger.info(f"Verificando/Creando Keyspace '{KEYSPACE}' con RF={REPLICATION_FACTOR}...")
+        logger.info(f"Verificando/Creando keyspace '{KEYSPACE}'...")
         session.execute(f"""
-            CREATE KEYSPACE IF NOT EXISTS {KEYSPACE}
-            WITH replication = {{
-                'class': 'SimpleStrategy',
-                'replication_factor': {REPLICATION_FACTOR}
-            }};
+        CREATE KEYSPACE IF NOT EXISTS {KEYSPACE}
+        WITH REPLICATION = {{
+            'class' : 'SimpleStrategy',
+            'replication_factor' : 1
+        }}
         """)
-        session.set_keyspace(KEYSPACE) # Cambiamos al keyspace correcto para las siguientes operaciones
-        logger.info(f"Usando Keyspace '{KEYSPACE}'.")
 
-        # --- 2. Crear Tabla 'transactions' (Ledger) ---
+        # Seleccionar el keyspace para las siguientes operaciones
+        session.set_keyspace(KEYSPACE)
+
+        # --- 2. Crear Tabla 'transactions' (Búsqueda por ID) ---
         logger.info("Verificando/Creando tabla 'transactions'...")
-        session.execute("""
-            CREATE TABLE IF NOT EXISTS transactions (
-                id uuid PRIMARY KEY,           
-                user_id int,                   
-                source_wallet_type text,       
-                source_wallet_id text,         
-                destination_wallet_type text, 
-                destination_wallet_id text,   
-                type text,                    
-                amount double,                 
-                currency text,                
-                status text,                  
-                created_at timestamp,         
-                updated_at timestamp,         
-                metadata text                  
-            );
+        session.execute(f"""
+        CREATE TABLE IF NOT EXISTS {KEYSPACE}.transactions (
+            id uuid PRIMARY KEY,
+            user_id int,
+            group_id int,
+            source_wallet_type text,
+            source_wallet_id text,
+            destination_wallet_type text,
+            destination_wallet_id text,
+            type text,
+            amount decimal,
+            currency text,
+            status text,
+            metadata text,
+            created_at timestamp,
+            updated_at timestamp
+        );
         """)
 
-        # --- 3. Crear Tabla 'idempotency_keys' ---
+        # --- 3. Crear Tabla 'idempotency_keys' (Evitar duplicados) ---
         logger.info("Verificando/Creando tabla 'idempotency_keys'...")
-        session.execute("""
-            CREATE TABLE IF NOT EXISTS idempotency_keys (
-                key uuid PRIMARY KEY,          
-                transaction_id uuid           
-            );
+        session.execute(f"""
+        CREATE TABLE IF NOT EXISTS {KEYSPACE}.idempotency_keys (
+            key uuid PRIMARY KEY,
+            transaction_id uuid
+        );
         """)
 
-       
-        # Esta es la tabla optimizada para LEER el historial de un usuario.
-        # Duplicamos datos (normal en NoSQL) para tener consultas rápidas.
+        # --- 4. Crear Tabla 'transactions_by_user' (Historial de Usuario) ---
         logger.info("Verificando/Creando tabla 'transactions_by_user'...")
         session.execute(f"""
         CREATE TABLE IF NOT EXISTS {KEYSPACE}.transactions_by_user (
             user_id int,
             created_at timestamp,
             id uuid,
+            group_id int,
             source_wallet_type text,
             source_wallet_id text,
             destination_wallet_type text,
@@ -138,18 +129,39 @@ def create_keyspace_and_tables(session: Session):
             PRIMARY KEY (user_id, created_at, id)
         ) WITH CLUSTERING ORDER BY (created_at DESC);
         """)
-        
 
-        # --- 4. Crear Índice Secundario en 'user_id' ---
-        logger.info("Verificando/Creando índice en 'transactions(user_id)'...")
-        session.execute("""
-            CREATE INDEX IF NOT EXISTS idx_transactions_user_id ON transactions (user_id);
+        # --- 5. Crear Tabla 'transactions_by_group' (Historial de Grupo) ---
+        # ¡ESTA ES LA TABLA QUE FALLABA!
+        logger.info("Verificando/Creando tabla 'transactions_by_group'...")
+        session.execute(f"""
+        CREATE TABLE IF NOT EXISTS {KEYSPACE}.transactions_by_group (
+            group_id int,
+            created_at timestamp,
+            id uuid,
+            user_id int,
+            source_wallet_type text,
+            source_wallet_id text,
+            destination_wallet_type text,
+            destination_wallet_id text,
+            type text,
+            amount decimal,
+            currency text,
+            status text,
+            metadata text,
+            updated_at timestamp,
+            PRIMARY KEY (group_id, created_at, id)
+        ) WITH CLUSTERING ORDER BY (created_at DESC);
         """)
-        
+
+        # --- 6. Crear Índices (Si son necesarios) ---
+        # (El índice en 'transactions' (user_id) no es ideal, pero lo dejamos por si acaso)
+        logger.info("Verificando/Creando índices...")
+        session.execute(f"""
+        CREATE INDEX IF NOT EXISTS ON {KEYSPACE}.transactions (user_id);
+        """)
 
         logger.info("Schema de Cassandra verificado/creado exitosamente.")
 
     except Exception as e:
         logger.error(f"Error fatal al crear/verificar el schema de Cassandra: {e}", exc_info=True)
-        # Es crucial que el schema exista; si falla aquí, el servicio no puede operar.
-        raise e # Relanzamos la excepción para detener potencialmente el inicio del servicio.
+        raise e # Relanzamos la excepción
