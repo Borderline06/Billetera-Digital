@@ -3,12 +3,16 @@
 import os
 import logging
 import bcrypt
+import random # <-- NUEVO
+import string # <-- NUEVO
+import httpx # <-- NUEVO
 from datetime import datetime, timedelta, timezone
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from dotenv import load_dotenv
 from typing import Dict, Optional
 from db import get_db
+from fastapi import HTTPException # <-- NUEVO
 
 # Carga variables de entorno desde .env
 load_dotenv()
@@ -26,6 +30,14 @@ if not SECRET_KEY:
 ALGORITHM = "HS256"
 
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 60 * 24))
+
+# --- NUEVO: Configuración de Verificación y Telegram ---
+VERIFICATION_CODE_EXPIRATION_MINUTES = int(os.getenv("VERIFICATION_CODE_EXPIRATION_MINUTES", 10))
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+
+if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "AQUI_VA_EL_TOKEN_DE_TU_BOT_DE_TELEGRAM":
+    logger.error("TELEGRAM_BOT_TOKEN no está definido en .env. El envío de códigos de verificación fallará.")
 
 
 pwd_context = CryptContext(
@@ -94,5 +106,38 @@ def decode_token(token: str) -> Optional[Dict]:
 # URL interna para el Balance Service
 BALANCE_SERVICE_URL = os.getenv("BALANCE_SERVICE_URL")
 if not BALANCE_SERVICE_URL:
-    logger.error("Variable de entorno BALANCE_SERVICE_URL no está definida.")
+     logger.error("Variable de entorno BALANCE_SERVICE_URL no está definida.")
+     
+# --- NUEVAS FUNCIONES DE VERIFICACIÓN ---
+
+def generate_verification_code(length: int = 6) -> str:
+    """Genera un código numérico aleatorio de 6 dígitos."""
+    return "".join(random.choices(string.digits, k=length))
+
+async def send_telegram_message(chat_id: str, message: str) -> bool:
+    """
+    Envía un mensaje a un chat_id de Telegram usando httpx.
+    Retorna True si fue exitoso, False si falló.
+    """
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "AQUI_VA_EL_TOKEN_DE_TU_BOT_DE_TELEGRAM":
+        logger.error("No se puede enviar mensaje: TELEGRAM_BOT_TOKEN no configurado.")
+        return False
+
+    url = f"{TELEGRAM_API_URL}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "Markdown" # Permite usar `*bold*` y `_italic_`
+    }
     
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+            logger.info(f"Mensaje de Telegram enviado exitosamente a chat_id: {chat_id}")
+            return True
+        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            logger.error(f"Error al enviar mensaje de Telegram a {chat_id}: {exc}")
+            if isinstance(exc, httpx.HTTPStatusError):
+                logger.error(f"Respuesta de Telegram: {exc.response.text}")
+            return False

@@ -1,49 +1,63 @@
-"""Modelos Pydantic (schemas) para validación de datos en el Balance Service."""
+# Billetera-Digital/balance_service/schemas.py (Corregido y Completo)
+
+"""Modelos Pydantic (schemas) para el Balance Service."""
 
 from pydantic import BaseModel, Field, ConfigDict
+from decimal import Decimal       # <-- ¡Importación clave!
+from datetime import datetime     # <-- ¡Importación clave!
+from typing import Optional       # <-- ¡Importación clave!
+from models import LoanStatus     # <-- ¡Importación clave!
 
-# --- Schemas para Cuentas Individuales (BDI) ---
+# --- Schemas de Cuenta Individual (BDI) ---
 
 class AccountCreate(BaseModel):
-    """Schema para la solicitud de creación de una cuenta individual."""
     user_id: int
 
 class BalanceUpdate(BaseModel):
-    """Schema para solicitar una actualización (crédito/débito) del saldo individual."""
     user_id: int
-    amount: float = Field(..., gt=0, description="El monto para actualizar debe ser positivo.")
+    amount: float # El 'float' se convertirá a Decimal en main.py
 
 class BalanceCheck(BaseModel):
-    """Schema para solicitar la verificación de fondos suficientes en una cuenta individual."""
     user_id: int
-    amount: float = Field(..., gt=0, description="El monto a verificar debe ser positivo.")
+    amount: float
+
+class DepositRequest(BaseModel):
+    """Schema para el modal de Préstamo (reusado)."""
+    amount: float = Field(..., gt=0) # gt=0 significa "greater than 0"
+
+# --- ¡CLASE QUE FALTABA! ---
+class LoanResponse(BaseModel):
+    """Schema para mostrar un préstamo activo."""
+    id: int
+    outstanding_balance: Decimal
+    status: LoanStatus
+    created_at: datetime
+    
+    model_config = ConfigDict(from_attributes=True)
+# --- FIN DE CLASE QUE FALTABA ---
 
 class AccountResponse(BaseModel):
-    """Schema para la respuesta al obtener detalles de una cuenta individual."""
-    id: int
+    """Respuesta principal para /balance/me."""
     user_id: int
-    balance: float
-    currency: str
+    balance: Decimal
+    version: int
+    active_loan: Optional[LoanResponse] = None # ¡Ahora 'LoanResponse' SÍ está definida!
 
-    # Configuración Pydantic v2+ para mapeo desde modelos ORM
     model_config = ConfigDict(from_attributes=True)
 
 
-# --- Esquemas de Billetera Grupal (BDG) ---
+# --- Schemas de Cuenta Grupal (BDG) ---
 
 class GroupAccountCreate(BaseModel):
-    """Schema para crear una cuenta de grupo (solo necesita el ID)."""
     group_id: int
-
-class GroupAccount(BaseModel):
-    """Schema para devolver la información de una cuenta de grupo."""
-    group_id: int
-    balance: float
-    version: int
-
-    model_config = ConfigDict(from_attributes=True)
 
 class GroupBalanceUpdate(BaseModel):
-    """Schema para acreditar/debitar una cuenta de grupo."""
     group_id: int
-    amount: float = Field(..., gt=0, description="El monto debe ser positivo.")
+    amount: float
+
+class GroupAccount(BaseModel):
+    group_id: int
+    balance: Decimal
+    version: int
+    
+    model_config = ConfigDict(from_attributes=True)

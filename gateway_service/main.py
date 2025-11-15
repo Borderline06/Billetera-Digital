@@ -62,6 +62,10 @@ app.add_middleware(
 PUBLIC_ROUTES = [
     "/auth/login",
     "/auth/register",
+    # --- NUEVAS RUTAS PÚBLICAS ---
+    "/auth/verify-phone",
+    "/auth/resend-code",
+    # --- FIN DE NUEVAS RUTAS ---
     "/health",
     "/metrics",
     "/docs",
@@ -282,6 +286,21 @@ async def proxy_login(request: Request):
     logger.info("Proxying request to /auth/login")
     return await forward_request(request, f"{AUTH_URL}/login")
 
+# --- NUEVOS ENDPOINTS PÚBLICOS DE VERIFICACIÓN ---
+
+@app.post("/auth/verify-phone", tags=["Authentication"])
+async def proxy_verify_phone(request: Request):
+    """Reenvía la solicitud de verificación de código al servicio de autenticación."""
+    logger.info("Proxying request to /auth/verify-phone")
+    return await forward_request(request, f"{AUTH_URL}/verify-phone")
+
+@app.post("/auth/resend-code", tags=["Authentication"])
+async def proxy_resend_code(request: Request):
+    """Reenvía la solicitud de reenvío de código al servicio de autenticación."""
+    logger.info("Proxying request to /auth/resend-code")
+    return await forward_request(request, f"{AUTH_URL}/resend-code")
+
+
 # --- Endpoints Privados (Proxy para Auth) ---
 
 @app.get("/auth/me", tags=["Authentication"])
@@ -315,11 +334,42 @@ async def proxy_get_my_balance(request: Request, user_id: int = Depends(get_curr
 
 # --- Endpoints Privados (Proxy para Ledger) ---
 
-@app.post("/ledger/deposit", tags=["Ledger"])
-async def proxy_deposit(request: Request, user_id: int = Depends(get_current_user_id)):
-    """Reenvía la solicitud de depósito al servicio de ledger, inyectando user_id."""
-    logger.info(f"Proxying request to /ledger/deposit for user_id: {user_id}")
-    return await forward_request(request, f"{LEDGER_URL}/deposit", inject_user_id=True, pass_headers=["Idempotency-Key", "Authorization"])
+# (¡Borra el endpoint 'proxy_deposit'!)
+
+@app.post("/request-loan", tags=["Ledger", "BDI Préstamos"])
+async def proxy_request_loan(
+    request: Request, 
+    user_id: int = Depends(get_current_user_id)
+):
+    """Proxy para que un usuario solicite un préstamo."""
+    logger.info(f"Proxying request to /request-loan for user_id: {user_id}")
+
+    # Esta llamada SÍ necesita el X-User-ID (que 'forward_request' añade)
+    return await forward_request(
+        request, 
+        f"{BALANCE_URL}/request-loan", # Llama al nuevo endpoint
+        inject_user_id=False,
+        pass_headers=["Authorization", "Idempotency-Key"] # Pasamos la Idempotency-Key
+    )
+
+# ... (después de 'proxy_request_loan')
+
+@app.post("/pay-loan", tags=["Ledger", "BDI Préstamos"])
+async def proxy_pay_loan(
+    request: Request, 
+    user_id: int = Depends(get_current_user_id)
+):
+    """Proxy para que un usuario pague su préstamo."""
+    logger.info(f"Proxying request to /pay-loan for user_id: {user_id}")
+
+    # Esta llamada SÍ necesita el X-User-ID
+    return await forward_request(
+        request, 
+        f"{BALANCE_URL}/pay-loan",
+        inject_user_id=False,
+        pass_headers=["Authorization", "Idempotency-Key"] 
+    )
+
 
 @app.post("/ledger/transfer", tags=["Ledger"])
 async def proxy_transfer(request: Request, user_id: int = Depends(get_current_user_id)):
@@ -637,6 +687,25 @@ async def proxy_get_withdrawal_requests(
     return await forward_request(
         request, 
         f"{GROUP_URL}/groups/{group_id}/withdrawal-requests",
+        inject_user_id=False,
+        pass_headers=["Authorization"]
+    )
+
+
+# ... (después de 'proxy_get_withdrawal_requests') ...
+
+@app.post("/groups/{group_id}/leader-withdrawal", tags=["Groups", "Junta (Retiros)"])
+async def proxy_leader_withdrawal(
+    group_id: int, 
+    request: Request, 
+    user_id: int = Depends(get_current_user_id)
+):
+    """Proxy para que un LÍDER ejecute un retiro directo."""
+    logger.info(f"Proxying request to /groups/{group_id}/leader-withdrawal for LÍDER {user_id}")
+
+    return await forward_request(
+        request, 
+        f"{GROUP_URL}/groups/{group_id}/leader-withdrawal",
         inject_user_id=False,
         pass_headers=["Authorization"]
     )

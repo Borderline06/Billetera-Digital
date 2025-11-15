@@ -877,3 +877,61 @@ def get_withdrawal_requests(
     ).order_by(models.WithdrawalRequest.created_at.desc()).all()
 
     return requests
+
+# ... (después de 'reject_withdrawal_request')
+
+@app.post("/groups/{group_id}/leader-withdrawal", tags=["Junta (Retiros)"])
+def leader_execute_withdrawal(
+    group_id: int,
+    req: schemas.LeaderWithdrawalRequest, # <-- Usa el nuevo schema
+    x_user_id: int = Header(..., alias="X-User-ID"), # ID del LÍDER
+    db: Session = Depends(get_db)
+):
+    """
+    Permite al LÍDER ejecutar un retiro directo (sin aprobación).
+    Esto dispara la SAGA de transferencia en el Ledger Service.
+    """
+    leader_user_id = x_user_id
+    logger.info(f"Líder {leader_user_id} ejecutando retiro directo de {req.amount} del grupo {group_id}")
+
+    # 1. Verificar que quien llama es el líder
+    group = db.query(models.Group).filter(
+        models.Group.id == group_id,
+        models.Group.leader_user_id == leader_user_id
+    ).first()
+    if not group:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Grupo no encontrado o no eres el líder.")
+
+    # (¡No necesitamos buscar una solicitud pendiente!)
+
+    # 2. ¡LLAMAR AL LEDGER SERVICE PARA EJECUTAR LA SAGA!
+    if not LEDGER_SERVICE_URL:
+         logger.error("¡LEDGER_SERVICE_URL no está configurada en group_service!")
+         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error de configuración interna.")
+
+    try:
+        saga_payload = {
+            "group_id": group_id,
+            "member_user_id": leader_user_id, # El dinero va al LÍDER
+            "amount": float(req.amount),
+            "request_id": 0 # Usamos 0 o null para indicar "retiro de líder"
+        }
+
+        with httpx.Client() as client:
+            # ¡Llamamos al "motor" que ya existe!
+            response = client.post(f"{LEDGER_SERVICE_URL}/group-withdrawal", json=saga_payload)
+            response.raise_for_status() # Falla aquí si el GRUPO no tiene fondos
+
+        # 3. ¡ÉXITO!
+        logger.info(f"Saga de retiro (Líder) completada exitosamente.")
+
+        # Devolvemos la transacción que el ledger nos devolvió
+        return response.json()
+
+    except httpx.HTTPStatusError as e:
+        # El Ledger falló (ej. 400 Fondos Insuficientes en el GRUPO)
+        logger.warning(f"Saga de retiro (Líder) falló: {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=f"Error del Ledger: {e.response.json().get('detail')}")
+    except Exception as e:
+        logger.error(f"Error en retiro de líder: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al procesar el retiro.")
