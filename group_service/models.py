@@ -37,6 +37,15 @@ class GroupMemberStatus(str, enum.Enum):
     PENDING = "pending"
     ACTIVE = "active"
     # (En el futuro: REJECTED, BANNED, etc.)
+
+# ... (después de class GroupMemberStatus...)
+
+class WithdrawalRequestStatus(str, enum.Enum):
+    """Define el estado de una solicitud de retiro."""
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    COMPLETED = "completed"
     
 class GroupMember(Base):
     """
@@ -59,3 +68,26 @@ class GroupMember(Base):
 
     group = relationship("Group", back_populates="members")
 
+
+# ... (después de la clase GroupMember) ...
+
+class WithdrawalRequest(Base):
+    """
+    Modelo SQLAlchemy que representa la tabla 'withdrawal_requests'.
+    Almacena las solicitudes de los miembros para retirar dinero del grupo.
+    """
+    __tablename__ = "withdrawal_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(Integer, ForeignKey("groups.id"), nullable=False)
+    member_user_id = Column(Integer, nullable=False) # El ID del miembro que solicita
+
+    amount = Column(Numeric(10, 2), nullable=False)
+    reason = Column(String(255), nullable=True) # Razón/descripción (ej. "para la cena")
+
+    status = Column(SQLEnum(WithdrawalRequestStatus), nullable=False, default=WithdrawalRequestStatus.PENDING)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relación (opcional, pero buena práctica)
+    group = relationship("Group")

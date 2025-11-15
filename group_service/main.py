@@ -15,7 +15,7 @@ from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_
 from decimal import Decimal
 
 from db import engine, Base, get_db, SessionLocal
-from models import Group, GroupMember, GroupRole, GroupMemberStatus
+from models import Group, GroupMember, GroupRole, GroupMemberStatus, WithdrawalRequest, WithdrawalRequestStatus
 from typing import Optional, List
 from dotenv import load_dotenv
 load_dotenv()
@@ -36,6 +36,7 @@ except Exception as e:
 app = FastAPI(title="Group Service", version="1.0.0")
 
 AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL")
+LEDGER_SERVICE_URL = os.getenv("LEDGER_SERVICE_URL")
 # --- (Métricas y Middleware) ---
 REQUEST_COUNT = Counter("group_requests_total", "Total requests", ["method", "endpoint", "status_code"])
 REQUEST_LATENCY = Histogram("group_request_latency_seconds", "Request latency", ["endpoint"])
@@ -469,6 +470,82 @@ def leave_group(
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al salirse del grupo.")
 
 
+# ... (después de 'leave_group')
+
+@app.delete("/groups/{group_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Groups"])
+def delete_group(
+    group_id: int,
+    x_user_id: int = Header(..., alias="X-User-ID"), # ID del LÍDER
+    db: Session = Depends(get_db)
+):
+    """
+    Permite al líder del grupo (X-User-ID) eliminar el grupo.
+    RESTRICCIÓN: Solo si el saldo del grupo es 0 Y ningún miembro tiene deuda.
+    """
+    leader_user_id = x_user_id
+    logger.info(f"Líder {leader_user_id} intentando ELIMINAR el grupo {group_id}")
+
+    # 1. Verificar que quien llama es el líder
+    group = db.query(models.Group).options(joinedload(models.Group.members)).filter(
+        models.Group.id == group_id,
+        models.Group.leader_user_id == leader_user_id
+    ).first()
+
+    if not group:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Grupo no encontrado o no eres el líder.")
+
+    # 2. ¡REGLA DE DEUDA! Verificar saldos internos
+    for member in group.members:
+        if member.internal_balance < Decimal('0.00'):
+            logger.warning(f"No se puede eliminar el grupo {group_id}. El miembro {member.user_id} tiene deuda.")
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"No se puede eliminar el grupo: El miembro con ID {member.user_id} tiene un saldo interno negativo (debe: {member.internal_balance}).")
+
+    # 3. ¡REGLA DE DINERO! Verificar saldo total del grupo (llamada al balance_service)
+    if not BALANCE_SERVICE_URL:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error de configuración: BALANCE_SERVICE_URL no definida.")
+
+    try:
+        with httpx.Client() as client:
+            response = client.get(f"{BALANCE_SERVICE_URL}/group_balance/{group_id}")
+            response.raise_for_status() # Lanza error si falla
+            balance_data = response.json()
+
+            if Decimal(str(balance_data.get("balance", 0))) > Decimal('0.00'):
+                logger.warning(f"No se puede eliminar el grupo {group_id}. Todavía tiene saldo: {balance_data.get('balance')}")
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "No se puede eliminar el grupo: el saldo total debe ser S/ 0.00.")
+
+    except httpx.HTTPStatusError as e:
+         raise HTTPException(status_code=e.response.status_code, detail=f"Error al verificar saldo del grupo: {e.response.json().get('detail')}")
+    except httpx.RequestError as e:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Error de red al contactar Balance Service: {e}")
+
+    # ... (después de la verificación de saldo de httpx) ...
+
+    # 4. ¡Todo en orden! Eliminar
+    try:
+        # group.members ya fue cargado por el 'joinedload' al inicio de la función
+
+        # a. Eliminar todas las membresías (la forma correcta)
+        for member in group.members:
+            db.delete(member)
+
+        # b. Eliminar el grupo (ahora que no tiene miembros, esto SÍ funciona)
+        db.delete(group)
+
+        # c. Confirmar los cambios
+        db.commit()
+
+        # d. (Opcional) Llamar a balance_service para borrar la group_account
+        # (Lo omitimos por ahora)
+
+        logger.info(f"Grupo {group_id} y sus {len(group.members)} membresías eliminados exitosamente.")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error al eliminar grupo de la BD: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al eliminar el grupo.")
+
 # REEMPLAZA la función 'invite_member' entera con esto:
 
 @app.post("/groups/{group_id}/invite", response_model=schemas.GroupMemberResponse, status_code=status.HTTP_201_CREATED, tags=["Groups"])
@@ -604,3 +681,199 @@ def get_group_details(
     return group_response
     # --- FIN DE LA NUEVA LÓGICA ---
 # ... (después de la función get_group_details)
+
+
+# ... (después de 'delete_group')
+
+@app.post("/groups/{group_id}/request-withdrawal", response_model=schemas.WithdrawalRequestResponse, status_code=status.HTTP_201_CREATED, tags=["Junta (Retiros)"])
+def create_withdrawal_request(
+    group_id: int,
+    req: schemas.WithdrawalRequestCreate,
+    x_user_id: int = Header(..., alias="X-User-ID"), # ID del Miembro que solicita
+    db: Session = Depends(get_db)
+):
+    """
+    Permite a un miembro ACTIVO crear una solicitud de retiro.
+    Esto queda PENDIENTE hasta que el líder lo apruebe.
+    """
+    member_user_id = x_user_id
+    logger.info(f"Miembro {member_user_id} solicitando retiro de {req.amount} del grupo {group_id}")
+
+    # 1. Verificar que el solicitante es un miembro activo
+    membership = db.query(models.GroupMember).filter(
+        models.GroupMember.group_id == group_id,
+        models.GroupMember.user_id == member_user_id,
+        models.GroupMember.status == models.GroupMemberStatus.ACTIVE
+    ).first()
+
+    if not membership:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "No eres un miembro activo de este grupo.")
+
+    # 2. (Opcional) Verificar si el grupo tiene fondos suficientes (chequeo rápido)
+    # (Lo omitimos por ahora, la verificación final la hará el líder al aprobar)
+
+    # 3. Crear la solicitud de retiro
+    try:
+        new_request = models.WithdrawalRequest(
+            group_id=group_id,
+            member_user_id=member_user_id,
+            amount=Decimal(str(req.amount)),
+            reason=req.reason,
+            status=models.WithdrawalRequestStatus.PENDING
+        )
+        db.add(new_request)
+        db.commit()
+        db.refresh(new_request)
+        logger.info(f"Solicitud de retiro {new_request.id} creada exitosamente.")
+        return new_request
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error al crear solicitud de retiro: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al crear la solicitud.")
+    
+
+# ... (después de 'create_withdrawal_request')
+
+@app.post("/groups/{group_id}/approve-withdrawal/{request_id}", response_model=schemas.WithdrawalRequestResponse, tags=["Junta (Retiros)"])
+def approve_withdrawal_request(
+    group_id: int,
+    request_id: int,
+    x_user_id: int = Header(..., alias="X-User-ID"), # ID del LÍDER
+    db: Session = Depends(get_db)
+):
+    """
+    Permite al LÍDER aprobar una solicitud de retiro PENDIENTE.
+    Esto dispara la SAGA de transferencia en el Ledger Service.
+    """
+    leader_user_id = x_user_id
+    logger.info(f"Líder {leader_user_id} intentando APROBAR solicitud {request_id} del grupo {group_id}")
+
+    # 1. Verificar que quien llama es el líder
+    group = db.query(models.Group).filter(
+        models.Group.id == group_id,
+        models.Group.leader_user_id == leader_user_id
+    ).first()
+    if not group:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Grupo no encontrado o no eres el líder.")
+
+    # 2. Encontrar la solicitud PENDIENTE
+    withdrawal_request = db.query(models.WithdrawalRequest).filter(
+        models.WithdrawalRequest.id == request_id,
+        models.WithdrawalRequest.group_id == group_id,
+        models.WithdrawalRequest.status == models.WithdrawalRequestStatus.PENDING
+    ).first()
+
+    if not withdrawal_request:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Solicitud de retiro no encontrada o ya fue procesada.")
+
+    # 3. ¡LLAMAR AL LEDGER SERVICE PARA EJECUTAR LA SAGA!
+    if not LEDGER_SERVICE_URL: # (Asegúrate de tener LEDGER_SERVICE_URL en tu .env de group_service)
+         logger.error("¡LEDGER_SERVICE_URL no está configurada en group_service!")
+         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error de configuración interna.")
+
+    try:
+        saga_payload = {
+            "group_id": group_id,
+            "member_user_id": withdrawal_request.member_user_id,
+            "amount": float(withdrawal_request.amount),
+            "request_id": request_id
+        }
+
+        with httpx.Client() as client:
+            # ¡Llamamos al "motor" que construimos en el Paso 171!
+            response = client.post(f"{LEDGER_SERVICE_URL}/group-withdrawal", json=saga_payload)
+            response.raise_for_status() # Lanza error si el Ledger falla (ej. fondos insuficientes en el GRUPO)
+
+        # 4. ¡ÉXITO! Marcar la solicitud como COMPLETADA
+        withdrawal_request.status = models.WithdrawalRequestStatus.COMPLETED
+        db.commit()
+        db.refresh(withdrawal_request)
+
+        logger.info(f"Saga de retiro {request_id} completada exitosamente.")
+        return withdrawal_request
+
+    except httpx.HTTPStatusError as e:
+        # El Ledger falló (ej. 400 Fondos Insuficientes en el GRUPO)
+        logger.warning(f"Saga de retiro {request_id} falló: {e.response.text}")
+        withdrawal_request.status = models.WithdrawalRequestStatus.REJECTED # Marcamos como rechazada
+        db.commit()
+        raise HTTPException(status_code=e.response.status_code, detail=f"Error del Ledger: {e.response.json().get('detail')}")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error al aprobar retiro: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al aprobar el retiro.")
+    
+
+# ... (después de 'approve_withdrawal_request')
+
+@app.post("/groups/{group_id}/reject-withdrawal/{request_id}", response_model=schemas.WithdrawalRequestResponse, tags=["Junta (Retiros)"])
+def reject_withdrawal_request(
+    group_id: int,
+    request_id: int,
+    x_user_id: int = Header(..., alias="X-User-ID"), # ID del LÍDER
+    db: Session = Depends(get_db)
+):
+    """
+    Permite al LÍDER rechazar una solicitud de retiro PENDIENTE.
+    """
+    leader_user_id = x_user_id
+    logger.info(f"Líder {leader_user_id} intentando RECHAZAR solicitud {request_id} del grupo {group_id}")
+
+    # 1. Verificar que quien llama es el líder
+    group = db.query(models.Group).filter(
+        models.Group.id == group_id,
+        models.Group.leader_user_id == leader_user_id
+    ).first()
+    if not group:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Grupo no encontrado o no eres el líder.")
+
+    # 2. Encontrar la solicitud PENDIENTE
+    withdrawal_request = db.query(models.WithdrawalRequest).filter(
+        models.WithdrawalRequest.id == request_id,
+        models.WithdrawalRequest.group_id == group_id,
+        models.WithdrawalRequest.status == models.WithdrawalRequestStatus.PENDING
+    ).first()
+
+    if not withdrawal_request:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Solicitud de retiro no encontrada o ya fue procesada.")
+
+    # 3. Marcar como RECHAZADA
+    try:
+        withdrawal_request.status = models.WithdrawalRequestStatus.REJECTED
+        db.commit()
+        db.refresh(withdrawal_request)
+        logger.info(f"Solicitud {request_id} marcada como REJECTED.")
+        return withdrawal_request
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error al rechazar retiro: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al rechazar el retiro.")
+
+
+@app.get("/groups/{group_id}/withdrawal-requests", response_model=List[schemas.WithdrawalRequestResponse], tags=["Junta (Retiros)"])
+def get_withdrawal_requests(
+    group_id: int,
+    x_user_id: int = Header(..., alias="X-User-ID"), # ID del LÍDER
+    db: Session = Depends(get_db)
+):
+    """
+    Obtiene la lista de TODAS las solicitudes de retiro (pendientes, aprobadas, etc.)
+    para un grupo. Solo el LÍDER puede ver esto.
+    """
+    leader_user_id = x_user_id
+    logger.info(f"Líder {leader_user_id} solicitando lista de retiros para el grupo {group_id}")
+
+    # 1. Verificar que quien llama es el líder
+    group = db.query(models.Group).filter(
+        models.Group.id == group_id,
+        models.Group.leader_user_id == leader_user_id
+    ).first()
+    if not group:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Grupo no encontrado o no eres el líder.")
+
+    # 2. Obtener todas las solicitudes de ese grupo
+    requests = db.query(models.WithdrawalRequest).filter(
+        models.WithdrawalRequest.group_id == group_id
+    ).order_by(models.WithdrawalRequest.created_at.desc()).all()
+
+    return requests
