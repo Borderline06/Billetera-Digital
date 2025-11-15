@@ -1,6 +1,7 @@
 import logging
 import time
 import httpx
+from datetime import datetime, timedelta, timezone # <-- NUEVO
 from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from fastapi.responses import Response
@@ -19,6 +20,10 @@ from utils import (
     create_access_token,
     decode_token,
     BALANCE_SERVICE_URL,
+    # --- NUEVAS IMPORTACIONES ---
+    generate_verification_code,
+    send_telegram_message,
+    VERIFICATION_CODE_EXPIRATION_MINUTES
 )
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
@@ -122,14 +127,26 @@ async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
     if db_phone:
         raise HTTPException(status_code=400, detail="Número de celular ya registrado")
     
+    # --- NUEVO: Verificar Telegram ID ---
+    db_telegram = db.query(User).filter(User.telegram_chat_id == user.telegram_chat_id).first()
+    if db_telegram:
+        raise HTTPException(status_code=400, detail="ID de Chat de Telegram ya registrado")
 
+    #hashed_password = get_password_hash(user.password)
+    # --- NUEVO: Generar Código y Expiración ---
     hashed_password = get_password_hash(user.password)
+    verification_code = generate_verification_code()
+    expires_at = datetime.utcnow() + timedelta(minutes=VERIFICATION_CODE_EXPIRATION_MINUTES)
 
     new_user = User(
         name=user.name,        
         email=user.email,
         hashed_password=hashed_password,
-        phone_number=user.phone_number
+        phone_number=user.phone_number,
+        telegram_chat_id=user.telegram_chat_id, # <-- NUEVO
+        is_phone_verified=False, # <-- NUEVO: Inicia como no verificado
+        phone_verification_code=verification_code, # <-- NUEVO
+        phone_verification_expires=expires_at # <-- NUEVO
     )
 
     try:
@@ -142,42 +159,23 @@ async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
         logger.error(f"Database error during user creation for email {user.email}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not save user.")
 
-    
-    async with httpx.AsyncClient() as client:
-        try:
-            create_account_url = f"{BALANCE_SERVICE_URL}/accounts"
-            response = await client.post(create_account_url, json={"user_id": new_user.id})
-            response.raise_for_status() 
-            logger.info(f"Successfully called Balance Service for user_id: {new_user.id}")
-        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
-            logger.error(f"Failed to call Balance Service for user_id {new_user.id}: {exc}", exc_info=True)
-            
-            logger.warning(f"Attempting to revert user creation for user_id {new_user.id} due to Balance Service failure.")
-            try:
-                db.delete(new_user)
-                db.commit()
-                logger.info(f"Successfully reverted user creation for user_id {new_user.id}.")
-            except Exception as delete_e:
-                
-                logger.critical(f"CRITICAL: Failed to revert user creation for user_id {new_user.id}: {delete_e}", exc_info=True)
-               
+# --- NUEVO: Enviar código por Telegram ---
+    try:
+        message = f"Hola *{new_user.name}*, bienvenido a Pixel Money.\nTu código de verificación es: `{verification_code}`\nEste código expira en {VERIFICATION_CODE_EXPIRATION_MINUTES} minutos."
+        send_success = await send_telegram_message(new_user.telegram_chat_id, message)
+        
+        if not send_success:
+            # El usuario se creó, pero el envío falló.
+            # El usuario puede usar "reenviar código".
+            logger.warning(f"Usuario {new_user.id} creado, pero el envío inicial de Telegram falló.")
+            # Opcionalmente, podrías lanzar un error aquí para informar al frontend:
+            # raise HTTPException(status_code=503, detail="Usuario creado, pero falló el envío del código de verificación. Por favor, intente 'reenviar código'.")
 
-            status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-            detail = f"Balance Service unavailable or failed."
-            if isinstance(exc, httpx.HTTPStatusError):
-                status_code = exc.response.status_code
-                try: 
-                    detail = f"Balance Service error: {exc.response.json().get('detail', exc.response.text)}"
-                except: 
-                     detail = f"Balance Service error: Status {status_code}"
-            raise HTTPException(status_code=status_code, detail=detail)
+    except Exception as e:
+        logger.error(f"Excepción inesperada al enviar Telegram a {new_user.id}: {e}")
+        # No revertimos la creación del usuario.
 
-    return {
-        "id": new_user.id,
-        "name": new_user.name,
-        "email": new_user.email,
-        "phone_number": new_user.phone_number
-    }
+    return new_user
 
 
 @app.post("/login", response_model=schemas.Token, tags=["Authentication"])
@@ -214,8 +212,147 @@ def login(db: Session = Depends(get_db), form_data: OAuth2PasswordRequestForm = 
         "token_type": "bearer",
         "user_id": user.id,
         "name": user.name,
-        "email": user.email
+        "email": user.email,
+        "is_phone_verified": user.is_phone_verified # <-- NUEVO
     }
+
+# --- NUEVOS ENDPOINTS DE VERIFICACIÓN ---
+
+# En main.py
+
+@app.post("/verify-phone", response_model=schemas.UserResponse, tags=["Authentication"])
+async def verify_phone(
+    verification_data: schemas.PhoneVerificationRequest, 
+    db: Session = Depends(get_db)
+):
+    """
+    Verifica un código de 6 dígitos enviado por Telegram.
+    Si es exitoso, marca el teléfono como verificado y crea la cuenta de balance.
+    """
+    logger.info(f"Intento de verificación para {verification_data.phone_number}")
+    
+    user = db.query(User).filter(User.phone_number == verification_data.phone_number).first()
+    
+    if not user:
+        logger.warning(f"Verificación fallida: Teléfono {verification_data.phone_number} no encontrado.")
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    if user.is_phone_verified:
+        logger.info(f"Verificación omitida: Teléfono {verification_data.phone_number} ya está verificado.")
+        raise HTTPException(status_code=400, detail="El teléfono ya está verificado")
+
+    if user.phone_verification_code != verification_data.code:
+        logger.warning(f"Verificación fallida: Código incorrecto para {verification_data.phone_number}")
+        raise HTTPException(status_code=400, detail="Código de verificación incorrecto")
+
+    
+    # --- NUEVA VALIDACIÓN 1: Asegurarse de que la fecha de expiración exista ---
+    if not user.phone_verification_expires:
+         logger.warning(f"Verificación fallida: No hay fecha de expiración para {verification_data.phone_number}")
+         # Esto podría pasar si el registro falló a la mitad
+         raise HTTPException(status_code=400, detail="Código inválido o dañado. Solicite uno nuevo.")
+
+
+    # Verificar expiración (ahora seguro)
+    if user.phone_verification_expires < datetime.utcnow():
+        logger.warning(f"Verificación fallida: Código expirado para {verification_data.phone_number}")
+        raise HTTPException(status_code=400, detail="Código de verificación expirado. Solicite uno nuevo.")
+
+    logger.info(f"Código verificado para {user.email} (ID: {user.id}). Procediendo a crear cuenta de balance.")
+
+    
+    # --- NUEVA VALIDACIÓN 2: Asegurarse de que la URL del servicio de balance exista ---
+    if not BALANCE_SERVICE_URL:
+        logger.critical("BALANCE_SERVICE_URL no está configurada en .env. No se puede crear la cuenta de balance.")
+        # Usamos 503 (Servicio No Disponible) en lugar de 500
+        raise HTTPException(status_code=503, detail="Error de configuración interna. El servicio no puede contactar al sistema de balances.")
+
+
+    # --- ¡Éxito! Ahora creamos la cuenta de balance ---
+    async with httpx.AsyncClient() as client:
+        try:
+            create_account_url = f"{BALANCE_SERVICE_URL}/accounts"
+            response = await client.post(create_account_url, json={"user_id": user.id})
+            response.raise_for_status() 
+            logger.info(f"Llamada exitosa a Balance Service para user_id: {user.id}")
+        
+        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            logger.error(f"Fallo al llamar a Balance Service para user_id {user.id} DURANTE LA VERIFICACIÓN: {exc}", exc_info=True)
+            
+            status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+            detail = "Servicio de Balance no disponible. Intente verificar nuevamente en unos minutos."
+            
+            if isinstance(exc, httpx.HTTPStatusError):
+                status_code = exc.response.status_code
+                try:
+                    detail = f"Error de Balance Service: {exc.response.json().get('detail', exc.response.text)}"
+                except:
+                    detail = f"Error de Balance Service: Status {status_code}"
+
+            raise HTTPException(status_code=status_code, detail=detail)
+
+    # --- Actualizar usuario en la BD ---
+    try:
+        user.is_phone_verified = True
+        user.phone_verification_code = None # Invalidar código
+        user.phone_verification_expires = None
+        db.commit()
+        db.refresh(user)
+        logger.info(f"Usuario {user.id} marcado como verificado.")
+    except Exception as e:
+        db.rollback()
+        logger.critical(f"CRÍTICO: No se pudo actualizar el estado verificado del usuario {user.id} después de crear la cuenta de balance: {e}")
+        raise HTTPException(status_code=500, detail="Error al finalizar la verificación del usuario. Contacte a soporte.")
+
+    return user
+
+@app.post("/resend-code", status_code=status.HTTP_204_NO_CONTENT, tags=["Authentication"])
+async def resend_verification_code(
+    request_data: schemas.RequestVerificationCode,
+    db: Session = Depends(get_db)
+):
+    """
+    Genera un nuevo código de verificación y lo reenvía por Telegram.
+    """
+    logger.info(f"Solicitud de reenvío de código para {request_data.phone_number}")
+    user = db.query(User).filter(User.phone_number == request_data.phone_number).first()
+
+    if not user:
+        logger.warning(f"Reenvío fallido: Teléfono {request_data.phone_number} no encontrado.")
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    
+    if user.is_phone_verified:
+        logger.warning(f"Reenvío fallido: Teléfono {request_data.phone_number} ya verificado.")
+        raise HTTPException(status_code=400, detail="El teléfono ya está verificado")
+
+    # Generar nuevo código y expiración
+    verification_code = generate_verification_code()
+    expires_at = datetime.utcnow() + timedelta(minutes=VERIFICATION_CODE_EXPIRATION_MINUTES)
+
+    try:
+        user.phone_verification_code = verification_code
+        user.phone_verification_expires = expires_at
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error de BD al actualizar el código de reenvío para {user.id}: {e}")
+        raise HTTPException(status_code=500, detail="Error al guardar el nuevo código.")
+    
+    # Enviar por Telegram
+    try:
+        message = f"Hola *{user.name}*,\nTu *nuevo* código de verificación para Pixel Money es: `{verification_code}`"
+        send_success = await send_telegram_message(user.telegram_chat_id, message)
+        
+        if not send_success:
+                logger.error(f"Fallo el reenvío de Telegram para {user.id}")
+                raise HTTPException(status_code=503, detail="Error al enviar el código de verificación. Inténtalo de nuevo.")
+
+    except Exception as e:
+        logger.error(f"Excepción inesperada al reenviar Telegram a {user.id}: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servicio de notificación.")
+    
+    # Retorna 204 No Content si todo fue bien
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 @app.get("/users/{user_id}", response_model=schemas.UserResponse, tags=["Users"])
 async def get_user_by_id(user_id: int, db: Session = Depends(get_db)):
@@ -235,12 +372,7 @@ async def get_user_by_id(user_id: int, db: Session = Depends(get_db)):
 
     logger.info(f"Usuario encontrado: {user.email} (ID: {user.id})")
 
-    return {
-        "id": user.id,
-        "name": user.name,
-        "email": user.email,
-        "phone_number": user.phone_number
-    }
+    return user
 
 
 @app.get("/verify", response_model=schemas.TokenPayload, tags=["Internal"])
@@ -274,4 +406,3 @@ def get_user_by_phone(phone_number: str, db: Session = Depends(get_db)):
     if db_user is None:
         raise HTTPException(status_code=404, detail="Usuario no encontrado con ese número de celular")
     return db_user
-
