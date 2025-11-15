@@ -62,6 +62,10 @@ app.add_middleware(
 PUBLIC_ROUTES = [
     "/auth/login",
     "/auth/register",
+    # --- NUEVAS RUTAS PÚBLICAS ---
+    "/auth/verify-phone",
+    "/auth/resend-code",
+    # --- FIN DE NUEVAS RUTAS ---
     "/health",
     "/metrics",
     "/docs",
@@ -281,6 +285,21 @@ async def proxy_login(request: Request):
     """Reenvía la solicitud de login (form-data) al servicio de autenticación."""
     logger.info("Proxying request to /auth/login")
     return await forward_request(request, f"{AUTH_URL}/login")
+
+# --- NUEVOS ENDPOINTS PÚBLICOS DE VERIFICACIÓN ---
+
+@app.post("/auth/verify-phone", tags=["Authentication"])
+async def proxy_verify_phone(request: Request):
+    """Reenvía la solicitud de verificación de código al servicio de autenticación."""
+    logger.info("Proxying request to /auth/verify-phone")
+    return await forward_request(request, f"{AUTH_URL}/verify-phone")
+
+@app.post("/auth/resend-code", tags=["Authentication"])
+async def proxy_resend_code(request: Request):
+    """Reenvía la solicitud de reenvío de código al servicio de autenticación."""
+    logger.info("Proxying request to /auth/resend-code")
+    return await forward_request(request, f"{AUTH_URL}/resend-code")
+
 
 # --- Endpoints Privados (Proxy para Auth) ---
 
