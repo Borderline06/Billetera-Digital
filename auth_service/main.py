@@ -6,6 +6,7 @@ from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from fastapi.responses import Response
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from sqlalchemy.orm import Session
+from datetime import datetime, timedelta, timezone  # <-- NUEVO
 
 # Importaciones locales
 from db import engine, Base, get_db
@@ -13,13 +14,8 @@ from models import User
 import db
 import schemas
 import models
-from utils import (
-    get_password_hash,
-    verify_password,
-    create_access_token,
-    decode_token,
-    BALANCE_SERVICE_URL,
-)
+import utils  # <-- Modificado para importar el módulo 'utils' completo
+import whatsapp_service  # <-- NUEVO
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
@@ -123,13 +119,19 @@ async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Número de celular ya registrado")
     
 
-    hashed_password = get_password_hash(user.password)
+    # --- Lógica de creación de usuario (MODIFICADA) ---
+    hashed_password = utils.get_password_hash(user.password)
+    verification_code = utils.generate_verification_code()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10) # Código expira en 10 min
 
     new_user = User(
-        name=user.name,        
+        name=user.name,
         email=user.email,
         hashed_password=hashed_password,
-        phone_number=user.phone_number
+        phone_number=user.phone_number,
+        is_active=False,  # <-- CAMBIO: Nace inactivo
+        verification_code=verification_code,
+        code_expires_at=expires_at
     )
 
     try:
@@ -172,12 +174,24 @@ async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
                      detail = f"Balance Service error: Status {status_code}"
             raise HTTPException(status_code=status_code, detail=detail)
 
-    return {
-        "id": new_user.id,
-        "name": new_user.name,
-        "email": new_user.email,
-        "phone_number": new_user.phone_number
-    }
+    # --- NUEVO: Enviar código de WhatsApp ---
+    # Se ejecuta solo si el usuario Y la cuenta de balance se crearon exitosamente.
+    try:
+        success = await whatsapp_service.send_verification_code(
+            phone_number=new_user.phone_number,
+            code=verification_code
+        )
+        if not success:
+            # No fallamos la petición, solo logueamos. El usuario puede "reenviar código".
+            logger.warning(f"User {new_user.email} registered, but FAILED to send WhatsApp verification code.")
+        else:
+            logger.info(f"WhatsApp verification code sent successfully to {new_user.email}.")
+    except Exception as e:
+        logger.error(f"CRITICAL: Error calling whatsapp_service post-registration: {e}", exc_info=True)
+        # No fallar la petición, solo loguear.
+
+    # --- CAMBIO: Devolver mensaje de éxito ---
+    return {"message": "Usuario registrado exitosamente. Revisa tu WhatsApp para obtener el código de verificación."}
 
 
 @app.post("/login", response_model=schemas.Token, tags=["Authentication"])
@@ -196,10 +210,62 @@ def login(db: Session = Depends(get_db), form_data: OAuth2PasswordRequestForm = 
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    
+    # --- NUEVA VERIFICACIÓN ---
+    if not user.is_active:
+        logger.warning(f"Login failed for user: {form_data.username} (Account NOT ACTIVE)")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="La cuenta no ha sido verificada. Por favor, revisa tu WhatsApp e ingresa el código."
+        )
 
-  
     access_token = create_access_token(data={"sub": str(user.id)})
     logger.info(f"Login successful for user_id: {user.id}")
+    return {"access_token": access_token, "token_type": "bearer"}
+
+# --- NUEVO ENDPOINT ---
+@app.post("/verify-phone", response_model=schemas.Token, tags=["Authentication"])
+async def verify_phone(data: schemas.VerifyPhone, db: Session = Depends(get_db)):
+    """
+    Verifica un código de teléfono, activa al usuario y
+    devuelve un token de acceso (login automático).
+    """
+    logger.info(f"Verification attempt for phone: {data.phone_number}")
+    
+    user = db.query(models.User).filter(models.User.phone_number == data.phone_number).first()
+    
+    if not user:
+        logger.warning(f"Verification failed: Phone {data.phone_number} not found.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Número de teléfono no encontrado")
+    
+    if user.is_active:
+        logger.info(f"Verification attempt for already active user: {user.email}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Esta cuenta ya ha sido verificada")
+    
+    if user.verification_code != data.code:
+        logger.warning(f"Verification failed for {user.email}: Invalid code.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Código de verificación incorrecto")
+    
+    if user.code_expires_at is None or datetime.now(timezone.utc) > user.code_expires_at:
+        logger.warning(f"Verification failed for {user.email}: Code expired.")
+        # Opcional: Aquí podrías implementar "reenviar código" automáticamente
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El código ha expirado.")
+    
+    # --- Activación Exitosa ---
+    try:
+        user.is_active = True
+        user.verification_code = None # Limpiamos el código
+        user.code_expires_at = None # Limpiamos la expiración
+        db.commit()
+        db.refresh(user)
+        logger.info(f"User {user.email} (ID: {user.id}) successfully verified and activated.")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Database error during user activation for {user.email}: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error al activar la cuenta.")
+
+    # Login automático: Devolver un token
+    access_token = utils.create_access_token(data={"sub": str(user.id)})
     return {"access_token": access_token, "token_type": "bearer"}
 
 @app.get("/users/{user_id}", response_model=schemas.UserResponse, tags=["Users"])
@@ -224,7 +290,8 @@ async def get_user_by_id(user_id: int, db: Session = Depends(get_db)):
         "id": user.id,
         "name": user.name,
         "email": user.email,
-        "phone_number": user.phone_number
+        "phone_number": user.phone_number,
+        "is_active": user.is_active # <-- CAMBIO: Devolvemos el estado
     }
 
 

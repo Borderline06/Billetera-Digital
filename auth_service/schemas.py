@@ -18,6 +18,7 @@ class UserResponse(BaseModel):
     name: str
     email: str
     phone_number: str | None = None
+    is_active: bool # <-- AÑADIDO: para ver el estado de activación
 
     # Configuración de Pydantic v2+ para permitir mapeo desde modelos ORM (SQLAlchemy)
     model_config = ConfigDict(from_attributes=True)
@@ -35,3 +36,14 @@ class TokenPayload(BaseModel):
     
     sub: Optional[str] = None
     exp: Optional[int] = None 
+
+# --- NUEVOS SCHEMAS PARA VERIFICACIÓN ---
+
+class VerifyPhone(BaseModel):
+    """Schema para recibir los datos de verificación."""
+    phone_number: str = Field(..., description="Número de teléfono que se está verificando")
+    code: str = Field(..., min_length=6, max_length=6, description="Código de 6 dígitos")
+
+class MessageResponse(BaseModel):
+    """Schema genérico para devolver un mensaje simple."""
+    message: str

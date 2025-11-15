@@ -3,6 +3,8 @@
 import os
 import logging
 import bcrypt
+import random  # <-- NUEVO
+import string  # <-- NUEVO
 from datetime import datetime, timedelta, timezone
 from passlib.context import CryptContext
 from jose import JWTError, jwt
@@ -41,6 +43,11 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def get_password_hash(password: str) -> str:
     """Genera el hash de una contraseña plana usando bcrypt."""
     return pwd_context.hash(password)
+
+# --- NUEVA FUNCIÓN ---
+def generate_verification_code(length: int = 6) -> str:
+    """Genera un código numérico aleatorio de 'length' dígitos."""
+    return "".join(random.choices(string.digits, k=length))
 
 # --- Utilidades para Tokens JWT ---
 def create_access_token(data: Dict) -> str:
@@ -95,4 +102,10 @@ def decode_token(token: str) -> Optional[Dict]:
 BALANCE_SERVICE_URL = os.getenv("BALANCE_SERVICE_URL")
 if not BALANCE_SERVICE_URL:
      logger.error("Variable de entorno BALANCE_SERVICE_URL no está definida.")
+
+# --- NUEVA VARIABLE ---
+# URL del webhook de n8n para enviar el código de WhatsApp
+N8N_VERIFICATION_WEBHOOK_URL = os.getenv("N8N_VERIFICATION_WEBHOOK_URL")
+if not N8N_VERIFICATION_WEBHOOK_URL:
+    logger.error("Variable de entorno N8N_VERIFICATION_WEBHOOK_URL no está definida.")
      

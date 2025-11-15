@@ -1,6 +1,6 @@
 """Define el modelo de la tabla 'users' usando SQLAlchemy ORM."""
 
-from sqlalchemy import Column, Integer, String, Boolean
+from sqlalchemy import Column, Integer, String, Boolean, DateTime
 
 from db import Base
 
@@ -12,3 +12,11 @@ class User(Base):
     phone_number = Column(String(20), unique=True, index=True, nullable=True)
     hashed_password = Column(String(255), nullable=False)
     is_active = Column(Boolean, default=True)
+
+    # --- CAMBIOS ---
+    # 1. El usuario ahora se crea como inactivo por defecto
+    is_active = Column(Boolean, default=False)
+    
+    # 2. Nuevos campos para el proceso de verificación
+    verification_code = Column(String(6), nullable=True)
+    code_expires_at = Column(DateTime, nullable=True)

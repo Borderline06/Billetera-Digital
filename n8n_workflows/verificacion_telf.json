@@ -1,0 +1,66 @@
+{
+  "name": "verificacion_telf",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "verificacion-telefono",
+        "options": {}
+      },
+      "id": "672d2f7f-d11e-41d1-86e5-4049d5c41f92",
+      "name": "Webhook de Verificación",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.2,
+      "position": [
+        1200,
+        400
+      ],
+      "webhookId": "a9f8f4a3-7f37-4f93-b657-3a1b7e453051"
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "from": "={{ $json.body.phone_number_id }}",
+        "to": "={{ $json.body.phone }}",
+        "type": "text",
+        "text": "={{ $json.body.message }}",
+        "options": {}
+      },
+      "id": "c71e227d-1c31-4e63-9f89-c4391b1574d3",
+      "name": "Enviar Código WhatsApp",
+      "type": "n8n-nodes-base.whatsApp",
+      "typeVersion": 1.3,
+      "position": [
+        1440,
+        400
+      ],
+      "credentials": {
+        "whatsAppBusinessCloudApi": {
+          "id": "YOUR_CREDENTIALS_ID",
+          "name": "Mis Credenciales de WhatsApp"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook de Verificación": {
+      "main": [
+        [
+          {
+            "node": "Enviar Código WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "pinData": {},
+  "versionId": "b18f0c23-1d07-4aef-b295-d855a8f4c28e",
+  "triggerCount": 0,
+  "tags": []
+}
