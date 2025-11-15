@@ -60,3 +60,21 @@ class Transaction(BaseModel):
 
     # Configuración Pydantic v2+ para mapear desde objetos de base de datos (ORM/Cassandra).
     model_config = ConfigDict(from_attributes=True)
+
+
+# En ledger_service/schemas.py
+
+class InboundTransferRequest(BaseModel):
+    """Schema para recibir dinero de un banco externo (API v1)."""
+    destination_phone_number: str = Field(..., min_length=9, max_length=15)
+    amount: float = Field(..., gt=0)
+    external_transaction_id: str # El ID de la transacción del "otro banco"
+
+# ... (al final del archivo)
+
+class GroupWithdrawalRequest(BaseModel):
+    """Schema interno para que el ledger procese un retiro de grupo."""
+    group_id: int
+    member_user_id: int # El ID del miembro que RECIBIRÁ el dinero
+    amount: float
+    request_id: int # El ID de la 'withdrawal_request' (de la BD de MariaDB)

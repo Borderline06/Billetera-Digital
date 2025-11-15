@@ -1,8 +1,9 @@
 """Define los modelos de las tablas 'groups' y 'group_members' usando SQLAlchemy ORM."""
 
 import enum
-from sqlalchemy import Column, Integer, String, ForeignKey, Enum as SQLEnum , DateTime, func
+from sqlalchemy import Column, Integer, String, ForeignKey, Enum as SQLEnum , DateTime, func, Numeric
 from sqlalchemy.orm import relationship
+from decimal import Decimal
 # Importación absoluta desde el módulo db.py del mismo directorio
 from db import Base
 
@@ -36,6 +37,15 @@ class GroupMemberStatus(str, enum.Enum):
     PENDING = "pending"
     ACTIVE = "active"
     # (En el futuro: REJECTED, BANNED, etc.)
+
+# ... (después de class GroupMemberStatus...)
+
+class WithdrawalRequestStatus(str, enum.Enum):
+    """Define el estado de una solicitud de retiro."""
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    COMPLETED = "completed"
     
 class GroupMember(Base):
     """
@@ -54,5 +64,30 @@ class GroupMember(Base):
 
     status = Column(SQLEnum(GroupMemberStatus), nullable=False, default=GroupMemberStatus.PENDING)
 
+    internal_balance = Column(Numeric(10, 2), nullable=False, default=Decimal('0.00'))
+
     group = relationship("Group", back_populates="members")
 
+
+# ... (después de la clase GroupMember) ...
+
+class WithdrawalRequest(Base):
+    """
+    Modelo SQLAlchemy que representa la tabla 'withdrawal_requests'.
+    Almacena las solicitudes de los miembros para retirar dinero del grupo.
+    """
+    __tablename__ = "withdrawal_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(Integer, ForeignKey("groups.id"), nullable=False)
+    member_user_id = Column(Integer, nullable=False) # El ID del miembro que solicita
+
+    amount = Column(Numeric(10, 2), nullable=False)
+    reason = Column(String(255), nullable=True) # Razón/descripción (ej. "para la cena")
+
+    status = Column(SQLEnum(WithdrawalRequestStatus), nullable=False, default=WithdrawalRequestStatus.PENDING)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relación (opcional, pero buena práctica)
+    group = relationship("Group")

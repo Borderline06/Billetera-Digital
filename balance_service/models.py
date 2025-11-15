@@ -1,6 +1,7 @@
 """Define los modelos de las tablas 'accounts' y 'group_accounts' usando SQLAlchemy ORM."""
 
 from sqlalchemy import Column, Integer, String, Float, UniqueConstraint, func, Numeric
+from decimal import Decimal
 # Importación absoluta desde el módulo db.py del mismo directorio
 from db import Base
 
@@ -20,7 +21,7 @@ class Account(Base):
 
     # Saldo actual de la cuenta individual.
     # NOTA: Float se usa por simplicidad; en producción se recomienda usar Decimal para precisión monetaria.
-    balance = Column(Float, nullable=False, default=0.0)
+    balance = Column(Numeric(10, 2), nullable=False, default=Decimal('0.00'))
 
     # Moneda de la cuenta 
     currency = Column(String(10), nullable=False, default="USD")

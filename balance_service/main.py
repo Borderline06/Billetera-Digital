@@ -153,14 +153,23 @@ def get_balance(user_id: int, db: Session = Depends(get_db)):
 def check_funds(check_in: schemas.BalanceCheck, db: Session = Depends(get_db)):
     """Verifica si una cuenta individual (BDI) tiene fondos suficientes (sin bloqueo)."""
     logger.debug(f"Verificando fondos {check_in.amount} para user_id: {check_in.user_id}")
+
+    # --- INICIO DE LA CORRECCIÓN ---
+    # Convertir el monto de entrada (float) a Decimal para una comparación segura
+    amount_to_check = Decimal(str(check_in.amount))
+    # --- FIN DE LA CORRECCIÓN ---
+
     account = db.query(Account).filter(Account.user_id == check_in.user_id).first()
     if not account:
         logger.warning(f"Check funds fallido: Cuenta no encontrada para user_id: {check_in.user_id}")
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Account for user_id {check_in.user_id} not found.")
 
-    if account.balance < check_in.amount:
-        logger.warning(f"Check funds fallido: Fondos insuficientes para user_id: {check_in.user_id} (Saldo: {account.balance}, Solicitado: {check_in.amount})")
+    # --- INICIO DE LA CORRECCIÓN ---
+    # Ahora comparamos Decimal (de la BD) vs Decimal (de la entrada)
+    if account.balance < amount_to_check:
+        logger.warning(f"Check funds fallido: Fondos insuficientes para user_id: {check_in.user_id} (Saldo: {account.balance}, Solicitado: {amount_to_check})")
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Insufficient funds.")
+    # --- FIN DE LA CORRECCIÓN ---
 
     return {"message": "Sufficient funds."}
 
@@ -176,7 +185,7 @@ def credit_balance(update_in: schemas.BalanceUpdate, db: Session = Depends(get_d
             logger.warning(f"Crédito fallido: Cuenta no encontrada para user_id: {update_in.user_id}")
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"Account for user_id {update_in.user_id} not found.")
 
-        account.balance += float(update_in.amount)
+        account.balance += Decimal(str(update_in.amount))
         db.commit()
         db.refresh(account)
         logger.info(f"Crédito exitoso. Nuevo balance para user_id {update_in.user_id}: {account.balance}")
@@ -190,26 +199,34 @@ def credit_balance(update_in: schemas.BalanceUpdate, db: Session = Depends(get_d
         logger.error(f"Error al acreditar balance para user_id {update_in.user_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal server error during credit.")
 
+# REEMPLAZA esta función en balance_service/main.py
+
 @app.post("/balance/debit", response_model=schemas.AccountResponse, tags=["BDI Balance"])
 def debit_balance(update_in: schemas.BalanceUpdate, db: Session = Depends(get_db)):
     """Debita (resta) fondos de una cuenta individual (BDI) usando bloqueo pesimista."""
     logger.info(f"Intentando debitar {update_in.amount} de user_id: {update_in.user_id}")
+
+    # Convertimos a Decimal para comparaciones seguras
+    amount_to_debit = Decimal(str(update_in.amount))
+
     try:
         db.begin()
+
         # Bloquea la fila para la actualización
         account = db.query(Account).filter(Account.user_id == update_in.user_id).with_for_update().first()
         if not account:
             logger.warning(f"Débito fallido: Cuenta no encontrada para user_id: {update_in.user_id}")
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"Account for user_id {update_in.user_id} not found.")
-        
+
         # --- ¡¡¡AÑADE ESTE BLOQUE DE SEGURIDAD!!! ---
-        # Doble verificación de fondos DENTRO de la transacción bloqueada
-        if account.balance < float(update_in.amount):
-            logger.warning(f"Débito fallido: Fondos insuficientes para user_id: {update_in.user_id} (Saldo: {account.balance}, Solicitado: {update_in.amount})")
+        # Comparamos Decimal vs Decimal
+        if account.balance < amount_to_debit:
+            logger.warning(f"Débito fallido: Fondos insuficientes para user_id: {update_in.user_id} (Saldo: {account.balance}, Solicitado: {amount_to_debit})")
+            db.rollback() # ¡Importante! Libera el bloqueo antes de salir
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Insufficient funds.")
         # --- FIN DEL BLOQUE DE SEGURIDAD ---
 
-        account.balance -= float(update_in.amount)
+        account.balance -= amount_to_debit # Restamos Decimal
         db.commit()
         db.refresh(account)
         logger.info(f"Débito exitoso. Nuevo balance para user_id {update_in.user_id}: {account.balance}")
@@ -222,9 +239,6 @@ def debit_balance(update_in: schemas.BalanceUpdate, db: Session = Depends(get_db
         db.rollback()
         logger.error(f"Error al debitar balance para user_id {update_in.user_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal server error during debit.")
-
-
-
 
 # --- ENDPOINTS DE BILLETERA GRUPAL (BDG) ---
 
@@ -304,3 +318,47 @@ def credit_group_balance(
         db.rollback()
         logger.error(f"Error interno al acreditar a grupo {update_in.group_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al procesar el aporte.")
+
+# ... (después de 'credit_group_balance')
+
+@app.post("/group_balance/debit", response_model=schemas.GroupAccount, tags=["Balance - Grupal"])
+def debit_group_balance(
+    update_in: schemas.GroupBalanceUpdate, 
+    db: Session = Depends(get_db)
+):
+    """
+    Debita (resta) fondos de una cuenta grupal (BDG) con control de fondos.
+    Llamado por 'ledger_service' cuando un líder aprueba un retiro.
+    """
+    logger.info(f"Intentando debitar {update_in.amount} de group_id: {update_in.group_id}")
+    amount_to_debit = Decimal(str(update_in.amount))
+
+    try:
+        with db.begin():
+            account = db.query(models.GroupAccount).filter(
+                models.GroupAccount.group_id == update_in.group_id
+            ).with_for_update().first() 
+
+            if not account:
+                logger.warning(f"Retiro fallido: Cuenta BDG no encontrada para group_id: {update_in.group_id}")
+                raise HTTPException(status.HTTP_404_NOT_FOUND, f"Cuenta de grupo (BDG) no encontrada.")
+
+            # ¡Verificación de fondos del GRUPO!
+            if account.balance < amount_to_debit:
+                logger.warning(f"Retiro fallido: Fondos insuficientes en el grupo {update_in.group_id}")
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "El grupo no tiene fondos suficientes para este retiro.")
+
+            account.balance -= amount_to_debit
+            db.commit() 
+
+        db.refresh(account)
+        logger.info(f"Retiro exitoso. Nuevo balance para group_id {account.group_id}: {account.balance}")
+        return account
+
+    except HTTPException:
+         db.rollback()
+         raise 
+    except Exception as e:
+         db.rollback()
+         logger.error(f"Error interno al debitar de grupo {update_in.group_id}: {e}", exc_info=True)
+         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al procesar el retiro.")

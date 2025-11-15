@@ -32,17 +32,17 @@ services:
     image: cassandra:4.1
     container_name: cassandra1
     restart: always
-    environment:
-      - CASSANDRA_CLUSTER_NAME=WalletCluster
-      - CASSANDRA_SEEDS=cassandra1
+    
     ports:
       - "9042:9042" 
+    environment:
+      - CASSANDRA_DC=dc1
     volumes:
       - cassandra1_data:/var/lib/cassandra
     networks:
       - wallet_net
     healthcheck:
-      test: ["CMD-SHELL", "nodetool status"]
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' || exit 1"]
       interval: 20s
       timeout: 10s
       retries: 10

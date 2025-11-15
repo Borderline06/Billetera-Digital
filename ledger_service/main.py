@@ -32,11 +32,11 @@ except ImportError:
     logger = logging.getLogger(__name__)
     logger.warning("Archivo utils.py no encontrado, cargando .env directamente.")
 
-# Configuración leída desde el entorno
 BALANCE_SERVICE_URL = os.getenv("BALANCE_SERVICE_URL")
 INTERBANK_SERVICE_URL = os.getenv("INTERBANK_SERVICE_URL")
-INTERBANK_API_KEY = os.getenv("INTERBANK_API_KEY", "dummy-key-for-dev")
+INTERBANK_API_KEY = os.getenv("INTERBANK_API_KEY")
 AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL")
+GROUP_SERVICE_URL = os.getenv("GROUP_SERVICE_URL") # ¡El que faltaba!
 KEYSPACE = cassandra_db.KEYSPACE
 
 # Configura logger (si no se hizo arriba)
@@ -54,7 +54,6 @@ db_session: Optional[Session] = None
 
 @app.on_event("startup")
 def startup_event():
-    """Inicializa la conexión a Cassandra y crea/verifica el schema al arrancar."""
     global db_session
     logger.info("Iniciando Ledger Service...")
     db_session = cassandra_db.get_cassandra_session()
@@ -63,19 +62,17 @@ def startup_event():
             cassandra_db.create_keyspace_and_tables(db_session)
         except Exception as e:
             logger.critical(f"FATAL: Error al configurar schema de Cassandra: {e}. El servicio no funcionará.", exc_info=True)
-            db_session = None 
+            db_session = None # Marcamos la sesión como nula
     else:
         logger.critical("FATAL: No se pudo conectar a Cassandra al inicio. El servicio no funcionará.")
 
 @app.on_event("shutdown")
 def shutdown_event():
-    """Cierra la conexión a Cassandra al apagar."""
     if db_session and db_session.cluster:
         db_session.cluster.shutdown()
         logger.info("Conexión a Cassandra cerrada.")
 
 def get_db() -> Session:
-    """Función de dependencia de FastAPI para obtener la sesión de Cassandra."""
     if db_session is None:
         logger.error("Intento de acceso a BD fallido: Sesión de Cassandra no disponible.")
         raise HTTPException(
@@ -84,24 +81,48 @@ def get_db() -> Session:
         )
     return db_session
 
-# --- Métricas Prometheus ---
-REQUEST_COUNT = Counter("ledger_requests_total", "Total requests", ["method", "endpoint", "status_code"])
-REQUEST_LATENCY = Histogram("ledger_request_latency_seconds", "Request latency", ["endpoint"])
-DEPOSIT_COUNT = Counter("ledger_deposits_total", "Número total de depósitos procesados")
-TRANSFER_COUNT = Counter("ledger_transfers_total", "Número total de transferencias procesadas")
-CONTRIBUTION_COUNT = Counter("ledger_contributions_total", "Número total de aportes a grupos")
+
+
+# --- Métricas Prometheus (Corregido para coincidir con el PDF) ---
+REQUEST_COUNT = Counter(
+    "ledger_requests_total", 
+    "Total requests", 
+    ["method", "endpoint", "status_code"]
+)
+REQUEST_LATENCY = Histogram(
+    "ledger_request_latency_seconds", 
+    "Request latency", 
+    ["endpoint"]
+)
+# ¡Nombres cortos que tu PDF usa!
+DEPOSIT_COUNT = Counter(
+    "ledger_deposits_total", 
+    "Número total de depósitos procesados"
+)
+TRANSFER_COUNT = Counter(
+    "ledger_transfers_total", 
+    "Número total de transferencias procesadas"
+)
+CONTRIBUTION_COUNT = Counter(
+    "ledger_contributions_total", 
+    "Número total de aportes a grupos"
+)
 LEDGER_P2P_TRANSFERS_TOTAL = Counter(
     "ledger_p2p_transfers_total",
     "Total de transferencias P2P (BDI -> BDI) procesadas"
 )
-
+# ¡AQUÍ ESTÁ EL SYNTAX ERROR ARREGLADO!
+LEDGER_WITHDRAWALS_TOTAL = Counter(
+    "ledger_withdrawals_total",
+    "Total de retiros (BDI -> Banco Externo) procesados"
+)
+# --- Fin del Bloque Corregido ---
 # --- Middleware para Métricas ---
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
     start_time = time.time()
     response = None
     status_code = 500
-
     try:
         response = await call_next(request)
         status_code = response.status_code
@@ -116,17 +137,11 @@ async def metrics_middleware(request: Request, call_next):
         endpoint = request.url.path
         final_status_code = getattr(response, 'status_code', status_code)
         REQUEST_LATENCY.labels(endpoint=endpoint).observe(latency)
-        REQUEST_COUNT.labels(
-            method=request.method,
-            endpoint=endpoint,
-            status_code=final_status_code
-        ).inc()
-
+        REQUEST_COUNT.labels(method=request.method, endpoint=endpoint, status_code=final_status_code).inc()
     return response
 
-# --- Función de Seguridad: Idempotencia ---
+# --- Funciones de Utilidad ---
 def check_idempotency(session: Session, key: str) -> Optional[uuid.UUID]:
-    """Verifica si una clave de idempotencia (UUID) ya existe. Devuelve el tx_id si existe."""
     if not key:
         return None
     try:
@@ -138,19 +153,17 @@ def check_idempotency(session: Session, key: str) -> Optional[uuid.UUID]:
         logger.warning(f"Clave de idempotencia inválida recibida: {key}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Formato de Idempotency-Key inválido (debe ser UUID)")
     except Exception as e:
-         logger.error(f"Error al verificar idempotencia para key {key}: {e}", exc_info=True)
-         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno al verificar idempotencia")
-
+        logger.error(f"Error al verificar idempotencia para key {key}: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno al verificar idempotencia")
 
 async def get_transaction_by_id(session: Session, tx_id: uuid.UUID) -> Optional[dict]:
-     """Obtiene una transacción por su ID desde Cassandra y la convierte a dict."""
-     try:
-          query = SimpleStatement(f"SELECT * FROM {KEYSPACE}.transactions WHERE id = %s")
-          result = session.execute(query, (tx_id,)).one()
-          return result._asdict() if result else None
-     except Exception as e:
-          logger.error(f"Error al obtener transacción {tx_id}: {e}", exc_info=True)
-          return None
+    try:
+        query = SimpleStatement(f"SELECT * FROM {KEYSPACE}.transactions WHERE id = %s")
+        result = session.execute(query, (tx_id,)).one()
+        return result._asdict() if result else None
+    except Exception as e:
+        logger.error(f"Error al obtener transacción {tx_id}: {e}", exc_info=True)
+        return None
 
 # --- Endpoints de la API ---
 
@@ -160,17 +173,15 @@ async def deposit(
     idempotency_key: Optional[str] = Header(None, description="Clave única (UUID v4) para idempotencia"),
     db: Session = Depends(get_db)
 ):
-    """Procesa un depósito en una cuenta individual (BDI)."""
     if idempotency_key is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cabecera Idempotency-Key es requerida")
 
     existing_tx_id = check_idempotency(db, idempotency_key)
     if existing_tx_id:
-        logger.info(f"Depósito duplicado detectado (Idempotency Key: {idempotency_key}). Devolviendo tx original: {existing_tx_id}")
+        logger.info(f"Depósito duplicado (Key: {idempotency_key}). Devolviendo tx: {existing_tx_id}")
         tx_data = await get_transaction_by_id(db, existing_tx_id)
         if tx_data: return schemas.Transaction(**tx_data)
-        logger.error(f"INCONSISTENCIA: Key {idempotency_key} existe pero tx_id {existing_tx_id} no encontrado.")
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error de idempotencia: Transacción original no encontrada")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error de idempotencia: Tx original no encontrada")
 
     tx_id = uuid.uuid4()
     now = datetime.now(timezone.utc)
@@ -178,32 +189,14 @@ async def deposit(
     status_final = "PENDING"
     currency = "PEN"
 
-   
     try:
-        # Preparamos las dos consultas (para 'transactions' y 'transactions_by_user')
-        query_by_id = SimpleStatement(f"""
-            INSERT INTO {KEYSPACE}.transactions (
-                id, user_id, source_wallet_type, source_wallet_id,
-                destination_wallet_type, destination_wallet_id, type, amount, currency,
-                status, created_at, updated_at, metadata
-            ) VALUES (%s, %s, 'EXTERNAL', 'N/A', 'BDI', %s, 'DEPOSIT', %s, %s, %s, %s, %s, %s)
-        """)
-
-        query_by_user = SimpleStatement(f"""
-            INSERT INTO {KEYSPACE}.transactions_by_user (
-                user_id, created_at, id, source_wallet_type, source_wallet_id,
-                destination_wallet_type, destination_wallet_id, type, amount, currency,
-                status, updated_at, metadata
-            ) VALUES (%s, %s, %s, 'EXTERNAL', 'N/A', 'BDI', %s, 'DEPOSIT', %s, %s, %s, %s, %s)
-        """)
-
-        # Usamos un BATCH para asegurar que ambas escrituras ocurran o ninguna
+        # (El BATCH de PENDING... se queda igual que en el PDF) [cite: 168-187]
+        query_by_id = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions (id, user_id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, created_at, updated_at, metadata) VALUES (%s, %s, 'EXTERNAL', 'N/A', 'BDI', %s, 'DEPOSIT', %s, %s, %s, %s, %s, %s)")
+        query_by_user = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions_by_user (user_id, created_at, id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, updated_at, metadata) VALUES (%s, %s, %s, 'EXTERNAL', 'N/A', 'BDI', %s, 'DEPOSIT', %s, %s, %s, %s, %s)")
         batch = BatchStatement()
-        batch.add(query_by_id, (tx_id, req.user_id, str(req.user_id), req.amount, currency, status_final, now, now, metadata_json))
-        batch.add(query_by_user, (req.user_id, now, tx_id, str(req.user_id), req.amount, currency, status_final, now, metadata_json))
-
+        batch.add(query_by_id, (tx_id, req.user_id, str(req.user_id), Decimal(str(req.amount)), currency, status_final, now, now, metadata_json))
+        batch.add(query_by_user, (req.user_id, now, tx_id, str(req.user_id), Decimal(str(req.amount)), currency, status_final, now, metadata_json))
         db.execute(batch)
-
     except Exception as e:
         logger.error(f"Error al insertar BATCH PENDING (depósito) {tx_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error al registrar la transacción inicial")
@@ -217,39 +210,40 @@ async def deposit(
             response.raise_for_status()
         status_final = "COMPLETED"
     except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        # (La lógica de error de depósito... se queda igual que en el PDF) [cite: 199-212]
         status_final = "FAILED_BALANCE_SVC"
         detail = f"Balance Service falló al acreditar: {e}"
         status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         if isinstance(e, httpx.HTTPStatusError):
-            try:
+            try: 
                 detail = e.response.json().get("detail", str(e))
-            except json.JSONDecodeError:
+            except json.JSONDecodeError: 
                 detail = e.response.text
             status_code = e.response.status_code
-
         logger.error(f"Fallo en tx {tx_id} (depósito): {detail}")
-        db.execute(f"UPDATE {KEYSPACE}.transactions SET status = %s, updated_at = %s WHERE id = %s",
-                   (status_final, datetime.now(timezone.utc), tx_id))
+        db.execute(f"UPDATE {KEYSPACE}.transactions SET status = %s, updated_at = %s WHERE id = %s", (status_final, datetime.now(timezone.utc), tx_id))
+        db.execute(f"UPDATE {KEYSPACE}.transactions_by_user SET status = %s, updated_at = %s WHERE user_id = %s AND created_at = %s AND id = %s", (status_final, datetime.now(timezone.utc), req.user_id, now, tx_id)) # ¡Fix! Añadido update a transactions_by_user
         raise HTTPException(status_code=status_code, detail=detail)
 
     try:
         idempotency_uuid = uuid.UUID(idempotency_key)
-        db.execute(f"INSERT INTO {KEYSPACE}.idempotency_keys (key, transaction_id) VALUES (%s, %s)",
-                   (idempotency_uuid, tx_id))
-        db.execute(f"UPDATE {KEYSPACE}.transactions SET status = %s, updated_at = %s WHERE id = %s",
-                   (status_final, datetime.now(timezone.utc), tx_id))
-        DEPOSIT_COUNT.inc()
+        db.execute(f"INSERT INTO {KEYSPACE}.idempotency_keys (key, transaction_id) VALUES (%s, %s)", (idempotency_uuid, tx_id))
+        db.execute(f"UPDATE {KEYSPACE}.transactions SET status = %s, updated_at = %s WHERE id = %s", (status_final, datetime.now(timezone.utc), tx_id))
+        db.execute(f"UPDATE {KEYSPACE}.transactions_by_user SET status = %s, updated_at = %s WHERE user_id = %s AND created_at = %s AND id = %s", (status_final, datetime.now(timezone.utc), req.user_id, now, tx_id)) # ¡Fix! Añadido update
+
+        DEPOSIT_COUNT.inc() # <-- ¡MÉTRICA CORREGIDA!
+
         logger.info(f"Depósito {status_final} para user_id {req.user_id}, tx_id {tx_id}")
     except Exception as final_e:
+        # (Lógica de PENDING_CONFIRMATION... se queda igual que en el PDF) [cite: 220-224]
         status_final = "PENDING_CONFIRMATION"
-        db.execute(f"UPDATE {KEYSPACE}.transactions SET status = %s, updated_at = %s WHERE id = %s",
-                   (status_final, datetime.now(timezone.utc), tx_id))
+        db.execute(f"UPDATE {KEYSPACE}.transactions SET status = %s, updated_at = %s WHERE id = %s", (status_final, datetime.now(timezone.utc), tx_id))
+        db.execute(f"UPDATE {KEYSPACE}.transactions_by_user SET status = %s, updated_at = %s WHERE user_id = %s AND created_at = %s AND id = %s", (status_final, datetime.now(timezone.utc), req.user_id, now, tx_id)) # ¡Fix! Añadido update
         logger.critical(f"¡FALLO CRÍTICO post-crédito en tx {tx_id}! Estado: {status_final}. Error: {final_e}. Requiere reconciliación manual.")
 
     tx_data = await get_transaction_by_id(db, tx_id)
     if not tx_data: raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "No se pudo recuperar la transacción final")
     return schemas.Transaction(**tx_data)
-
 
 @app.post("/transfer", response_model=schemas.Transaction, status_code=status.HTTP_201_CREATED, tags=["Transactions"])
 async def transfer(
@@ -399,7 +393,7 @@ async def transfer(
                        (idempotency_uuid, tx_id))
             db.execute(f"UPDATE {KEYSPACE}.transactions SET status = %s, metadata = %s, updated_at = %s WHERE id = %s",
                        (status_final, json.dumps(metadata), datetime.now(timezone.utc), tx_id))
-            TRANSFER_COUNT.inc() # Incrementamos métrica
+            LEDGER_P2P_TRANSFERS_TOTAL.inc() # Incrementamos métrica
             logger.info(f"Transferencia {status_final} para user_id {req.user_id}, tx_id {tx_id}")
         except Exception as final_e:
              status_final = "PENDING_CONFIRMATION"
@@ -412,187 +406,175 @@ async def transfer(
     return schemas.Transaction(**tx_data)
 
 
+# REEMPLAZA la función 'contribute_to_group' entera con esto:
+
 @app.post("/contribute", response_model=schemas.Transaction, status_code=status.HTTP_201_CREATED, tags=["Transactions"])
 async def contribute_to_group(
     req: schemas.ContributionRequest,
     idempotency_key: Optional[str] = Header(None, description="Clave única (UUID v4) para idempotencia"),
     db: Session = Depends(get_db)
 ):
-    """Procesa un aporte desde una BDI (individual) a una BDG (grupal)."""
+    """
+    Procesa un aporte desde una BDI (individual) a una BDG (grupal).
+    Crea 2 transacciones: SENT (para el usuario) y RECEIVED (para el grupo).
+    """
     if idempotency_key is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cabecera Idempotency-Key es requerida")
 
+    sender_id = req.user_id
+    group_id = req.group_id
+    amount = req.amount
+
     existing_tx_id = check_idempotency(db, idempotency_key)
     if existing_tx_id:
-        logger.info(f"Aporte duplicado detectado (Key: {idempotency_key}). Devolviendo tx: {existing_tx_id}")
+        logger.info(f"Aporte duplicado (Key: {idempotency_key}). Devolviendo tx: {existing_tx_id}")
         tx_data = await get_transaction_by_id(db, existing_tx_id)
         if tx_data: return schemas.Transaction(**tx_data)
-        logger.error(f"INCONSISTENCIA: Key {idempotency_key} existe pero tx_id {existing_tx_id} no encontrado.")
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error de idempotencia: Transacción original no encontrada")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error de idempotencia: Tx original no encontrada")
 
-    tx_id = uuid.uuid4()
+    tx_id_sent = uuid.uuid4()
+    tx_id_received = uuid.uuid4()
     now = datetime.now(timezone.utc)
-    metadata = {"contribution_to_group_id": req.group_id}
-    status_final = "PENDING"
     currency = "PEN"
+    metadata = {"contribution_to_group_id": group_id}
+    metadata_json = json.dumps(metadata)
 
-    try:
-        db.execute(
-            f"""
-            INSERT INTO {KEYSPACE}.transactions (
-                id, user_id, source_wallet_type, source_wallet_id,
-                destination_wallet_type, destination_wallet_id, type, amount, currency,
-                status, created_at, updated_at, metadata
-            ) VALUES (%s, %s, 'BDI', %s, 'BDG', %s, 'CONTRIBUTION', %s, %s, %s, %s, %s, %s)
-            """,
-            (tx_id, req.user_id, str(req.user_id), str(req.group_id),
-             req.amount, currency, status_final, now, now, json.dumps(metadata))
-        )
-    except Exception as e:
-        logger.error(f"Error al insertar tx PENDING (aporte) {tx_id}: {e}", exc_info=True)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error al registrar la transacción inicial")
-
-    
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            # 1. Verificar Fondos en BDI origen
-            logger.debug(f"Tx {tx_id}: Verificando fondos BDI para user_id {req.user_id}")
-            await client.post(
-                f"{BALANCE_SERVICE_URL}/balance/check",
-                json={"user_id": req.user_id, "amount": req.amount}
-            )
 
-            # 2. Debitar BDI origen
-            logger.debug(f"Tx {tx_id}: Debitando BDI para user_id {req.user_id}")
-            await client.post(
+            # 1. Debitar BDI origen (¡Verifica y resta!)
+            logger.debug(f"Tx {tx_id_sent}: Debitando BDI para user_id {sender_id}")
+            debit_res = await client.post(
                 f"{BALANCE_SERVICE_URL}/balance/debit",
-                json={"user_id": req.user_id, "amount": req.amount}
+                json={"user_id": sender_id, "amount": amount}
             )
+            debit_res.raise_for_status() # Falla aquí si hay 'Insufficient funds' (400)
 
-            # 3. Acreditar BDG destino
-            logger.debug(f"Tx {tx_id}: Acreditando BDG para group_id {req.group_id}")
-            await client.post(
-                f"{BALANCE_SERVICE_URL}/group_balance/credit",
-                json={"group_id": req.group_id, "amount": req.amount}
-            )
-
-            # 4. Todo OK
-            status_final = "COMPLETED"
-
-    
-    except httpx.HTTPStatusError as e: # Captura errores 4xx/5xx de balance_service
-        status_code = e.response.status_code
-        try:
-            detail = e.response.json().get("detail", "Error desconocido del servicio interno.")
-        except json.JSONDecodeError:
-            detail = e.response.text
-
-        if status_code == 400: status_final = "FAILED_FUNDS"
-        elif status_code == 404: status_final = "FAILED_ACCOUNT"
-        else: status_final = "FAILED_BALANCE_SVC"
-
-        # Lógica de Reversión (Saga simple)
-        if status_final != "FAILED_FUNDS":
-            logger.warning(f"Aporte falló ({status_final}) después del débito en tx {tx_id}. Intentando revertir débito BDI...")
+            # 2. Acreditar BDG destino
             try:
+                logger.debug(f"Tx {tx_id_received}: Acreditando BDG para group_id {group_id}")
+                credit_res = await client.post(
+                    f"{BALANCE_SERVICE_URL}/group_balance/credit",
+                    json={"group_id": group_id, "amount": amount}
+                )
+                credit_res.raise_for_status() 
+
+                # 3. Actualizar Saldo Interno
+                logger.debug(f"Tx {tx_id_received}: Actualizando internal_balance para user {sender_id}")
+                internal_res = await client.post(
+                    f"{GROUP_SERVICE_URL}/groups/{group_id}/member_balance",
+                    json={"user_id_to_update": sender_id, "amount": amount} # ¡Es un Aporte (positivo)!
+                )
+                internal_res.raise_for_status()
+
+            except Exception as credit_error:
+                # ¡FALLO DE SAGA! Revertir el débito
+                logger.error(f"¡FALLO DE SAGA! Crédito al grupo {group_id} falló. Revertiendo débito {tx_id_sent}...")
                 async with httpx.AsyncClient() as revert_client:
                     revert_res = await revert_client.post(
-                        f"{BALANCE_SERVICE_URL}/balance/credit", # Usamos CREDIT para revertir
-                        json={"user_id": req.user_id, "amount": req.amount}
+                        f"{BALANCE_SERVICE_URL}/balance/credit", # ¡Revertimos con un CRÉDITO!
+                        json={"user_id": sender_id, "amount": amount}
                     )
                     revert_res.raise_for_status()
-                status_final += "_REVERTED"
-                logger.info(f"Reversión de débito BDI para tx {tx_id} exitosa.")
-            except Exception as revert_e:
-                logger.critical(f"¡FALLO CRÍTICO EN REVERSIÓN para tx {tx_id}! Error: {revert_e}. Requiere reconciliación manual.")
-                status_final += "_REVERT_FAILED"
+                logger.info(f"Reversión de débito BDI para tx {tx_id_sent} exitosa.")
 
-        db.execute(f"UPDATE {KEYSPACE}.transactions SET status = %s, updated_at = %s WHERE id = %s",
-                (status_final, datetime.now(timezone.utc), tx_id))
-        raise HTTPException(status_code=status_code, detail=detail) # Re-lanzamos
+                if isinstance(credit_error, httpx.HTTPStatusError):
+                    raise HTTPException(status_code=credit_error.response.status_code, detail=f"Error al acreditar al grupo: {credit_error.response.json().get('detail')}")
+                else:
+                    raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al acreditar al grupo.")
 
-    except httpx.RequestError as e: # Error de Red
-        status_final = "FAILED_NETWORK"
-        db.execute(f"UPDATE {KEYSPACE}.transactions SET status = %s, updated_at = %s WHERE id = %s",
-                (status_final, datetime.now(timezone.utc), tx_id))
-        logger.error(f"Fallo de red en tx {tx_id} (aporte): {e}", exc_info=True)
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Error de red con Balance Service: {e}")
+        # 4. ¡ÉXITO! Escribir ambas transacciones en Cassandra
+        status_final = "COMPLETED"
+        decimal_amount = Decimal(str(amount))
 
-    except Exception as e: # Bug nuestro
-        status_final = "FAILED_UNKNOWN"
-        db.execute(f"UPDATE {KEYSPACE}.transactions SET status = %s, updated_at = %s WHERE id = %s",
-                (status_final, datetime.now(timezone.utc), tx_id))
-        logger.error(f"Error inesperado en tx {tx_id} (aporte): {e}", exc_info=True)
+        batch = BatchStatement()
+
+        # Tx de SALIDA (para el historial del USUARIO)
+        q_sent_id = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions (id, user_id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, created_at, updated_at, metadata) VALUES (%s, %s, 'BDI', %s, 'BDG', %s, 'CONTRIBUTION_SENT', %s, %s, %s, %s, %s, %s)")
+        q_sent_user = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions_by_user (user_id, created_at, id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, updated_at, metadata) VALUES (%s, %s, %s, 'BDI', %s, 'BDG', %s, 'CONTRIBUTION_SENT', %s, %s, %s, %s, %s)")
+        batch.add(q_sent_id, (tx_id_sent, sender_id, str(sender_id), str(group_id), decimal_amount, currency, status_final, now, now, metadata_json))
+        batch.add(q_sent_user, (sender_id, now, tx_id_sent, str(sender_id), str(group_id), decimal_amount, currency, status_final, now, metadata_json))
+
+        # Tx de ENTRADA (para el historial del GRUPO)
+        q_received_id = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions (id, user_id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, created_at, updated_at, metadata) VALUES (%s, %s, 'BDI', %s, 'BDG', %s, 'CONTRIBUTION_RECEIVED', %s, %s, %s, %s, %s, %s)")
+        q_received_group = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions_by_group (group_id, created_at, id, user_id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, updated_at, metadata) VALUES (%s, %s, %s, %s, 'BDI', %s, 'BDG', %s, 'CONTRIBUTION_RECEIVED', %s, %s, %s, %s, %s)")
+        batch.add(q_received_id, (tx_id_received, sender_id, str(sender_id), str(group_id), decimal_amount, currency, status_final, now, now, metadata_json))
+        batch.add(q_received_group, (group_id, now, tx_id_received, sender_id, str(sender_id), str(group_id), decimal_amount, currency, status_final, now, metadata_json))
+
+        db.execute(batch)
+        db.execute(f"INSERT INTO {KEYSPACE}.idempotency_keys (key, transaction_id) VALUES (%s, %s)", (uuid.UUID(idempotency_key), tx_id_sent))
+
+        CONTRIBUTION_COUNT.inc() # <-- ¡MÉTRICA CORREGIDA!
+
+        tx_data = await get_transaction_by_id(db, tx_id_sent)
+        if not tx_data: raise Exception("No se pudo recuperar la transacción final")
+        return schemas.Transaction(**tx_data)
+
+    except httpx.HTTPStatusError as e: # Captura el 400 "Insufficient funds"
+        status_code = e.response.status_code
+        detail = e.response.json().get("detail", "Error en servicios internos.")
+        status_final = "FAILED_FUNDS" if status_code == 400 else "FAILED_BALANCE_SVC"
+
+        logger.warning(f"Aporte {status_final} para tx {tx_id_sent}: {detail}")
+        # (Opcional: escribir una tx 'FAILED_FUNDS' en Cassandra)
+        raise HTTPException(status_code=status_code, detail=detail)
+
+    except Exception as e:
+        logger.error(f"Error inesperado en tx {tx_id_sent} (aporte): {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno inesperado procesando el aporte")
     
-
-    # Si todo fue exitoso
-    if status_final == "COMPLETED":
-        try:
-            idempotency_uuid = uuid.UUID(idempotency_key)
-            db.execute(f"INSERT INTO {KEYSPACE}.idempotency_keys (key, transaction_id) VALUES (%s, %s)",
-                       (idempotency_uuid, tx_id))
-            db.execute(f"UPDATE {KEYSPACE}.transactions SET status = %s, updated_at = %s WHERE id = %s",
-                       (status_final, datetime.now(timezone.utc), tx_id))
-            CONTRIBUTION_COUNT.inc() # Incrementa métrica
-            logger.info(f"Aporte {status_final} de user_id {req.user_id} a group_id {req.group_id}, tx_id {tx_id}")
-        except Exception as final_e:
-             status_final = "PENDING_CONFIRMATION"
-             db.execute(f"UPDATE {KEYSPACE}.transactions SET status = %s, updated_at = %s WHERE id = %s",
-                   (status_final, datetime.now(timezone.utc), tx_id))
-             logger.critical(f"¡FALLO CRÍTICO post-aporte en tx {tx_id}! Estado: {status_final}. Error: {final_e}. Requiere reconciliación.")
-
-    tx_data = await get_transaction_by_id(db, tx_id)
-    if not tx_data: raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "No se pudo recuperar la transacción final")
-    return schemas.Transaction(**tx_data)
-
-
 
 @app.get("/transactions/me", response_model=List[schemas.Transaction], tags=["Ledger"])
 async def get_my_transactions(
     x_user_id: int = Header(..., alias="X-User-ID"),
     db: Session = Depends(get_db)
 ):
-    """
-    Obtiene el historial de transacciones (movimientos) para el usuario autenticado.
-    Lee directamente de la base de datos NoSQL (Cassandra).
-    """
     logger.info(f"Obteniendo historial de movimientos para user_id: {x_user_id}")
-
-    # Cassandra 
     query = SimpleStatement(f"""
         SELECT * FROM {KEYSPACE}.transactions_by_user
         WHERE user_id = %s
         ORDER BY created_at DESC
         LIMIT 50
     """)
-
     try:
-        # Ejecutamos la consulta
         result_set = db.execute(query, (x_user_id,))
-
-        # Convertimos las filas de Cassandra a nuestro schema Pydantic
         transactions = [schemas.Transaction(**row._asdict()) for row in result_set]
-
         return transactions
     except Exception as e:
         logger.error(f"Error al obtener transacciones para user_id {x_user_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error al obtener historial de movimientos.")
 
-@app.get("/analytics/daily_balance/{user_id}", tags=["Analytics"])
-async def get_daily_balance(user_id: int, db: Session = Depends(get_db)):
-    """
-    Devuelve el saldo acumulado diario del usuario en los últimos 30 días.
-    Fuente: Cassandra (tabla transactions_by_user)
-    Ideal para gráficos de área (histórico de balance).
-    """
-    logger.info(f"Calculando saldo diario para user_id: {user_id}")
+# ... (después de 'get_my_transactions')
 
-    # --- Rango de 30 días atrás ---
+@app.get("/transactions/group/{group_id}", response_model=List[schemas.Transaction], tags=["Ledger"])
+async def get_group_transactions(
+    group_id: int,
+    db: Session = Depends(get_db)
+):
+    logger.info(f"Obteniendo historial de movimientos para group_id: {group_id}")
+    query = SimpleStatement(f"""
+        SELECT * FROM {KEYSPACE}.transactions_by_group
+        WHERE group_id = %s
+        ORDER BY created_at DESC
+        LIMIT 100
+    """)
+    try:
+        result_set = db.execute(query, (group_id,))
+        transactions = [schemas.Transaction(**row._asdict()) for row in result_set]
+        return transactions
+    except Exception as e:
+        logger.error(f"Error al obtener transacciones para group_id {group_id}: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error al obtener historial de movimientos del grupo.")
+
+@app.get("/analytics/daily_balance/{user_id}", tags=["Analytics"])
+async def get_daily_balance(
+    user_id: int, 
+    db: Session = Depends(get_db)
+):
+    logger.info(f"Calculando saldo diario para user_id: {user_id}")
     now = datetime.now(timezone.utc)
     thirty_days_ago = now - timedelta(days=30)
 
-    # --- Consulta a Cassandra ---
     query = SimpleStatement(f"""
         SELECT created_at, type, amount
         FROM {KEYSPACE}.transactions_by_user
@@ -604,41 +586,34 @@ async def get_daily_balance(user_id: int, db: Session = Depends(get_db)):
     try:
         result_set = db.execute(query, (user_id, thirty_days_ago))
 
-        # --- Procesar movimientos ---
-        daily_balance = defaultdict(float)
-        running_balance = Decimal('0.0')
+        daily_balance = defaultdict(Decimal) # Usar Decimal
+        running_balance = Decimal('0.0') 
 
         for row in result_set:
             tx_date = row.created_at.date()
-
-            # Tipos de transacción que SUMAN
-            if row.type in ["DEPOSIT", "P2P_RECEIVED", "CONTRIBUTION_RECEIVED"]:
+            if row.type in ["DEPOSIT", "P2P_RECEIVED", "CONTRIBUTION_RECEIVED", "GROUP_WITHDRAWAL"]: # ¡Añadido GROUP_WITHDRAWAL!
                 running_balance += row.amount
-
-            # Tipos de transacción que RESTAN
-            elif row.type in ["P2P_SENT", "CONTRIBUTION_SENT", "WITHDRAWAL"]:
+            elif row.type in ["P2P_SENT", "CONTRIBUTION_SENT", "TRANSFER"]:
                 running_balance -= row.amount
-
             daily_balance[tx_date] = running_balance
 
-        # --- Completar días faltantes ---
         data = []
-        balance = 0.0
-        for i in range(30, -1, -1):
+        balance = Decimal('0.0')
+        for i in range(30, -1, -1): # 30 días atrás hasta hoy
             day = (now - timedelta(days=i)).date()
             if day in daily_balance:
                 balance = daily_balance[day]
+
             data.append({
                 "date": day.isoformat(),
                 "balance": float(round(balance, 2))
             })
 
         return data
-
     except Exception as e:
         logger.error(f"Error al calcular balance diario para {user_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error al calcular el balance diario.")
-
+    
 @app.post("/transfer/p2p", response_model=schemas.Transaction, status_code=status.HTTP_201_CREATED, tags=["Transactions"])
 async def transfer_p2p(
     req: schemas.P2PTransferRequest,
@@ -771,6 +746,198 @@ async def transfer_p2p(
         logger.critical(f"¡FALLO CRÍTICO POST-SAGA! Tx {tx_id_debit} y {tx_id_credit} tuvieron éxito pero Cassandra falló: {e}", exc_info=True)
         # No revertimos, ¡el dinero ya se movió! Esto requiere reconciliación manual.
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "La transferencia se completó pero falló al registrarse. Contacte a soporte.")
+
+
+# ... (después de tu función 'get_daily_balance'...)
+
+@app.post("/transfers/inbound", response_model=schemas.Transaction, status_code=status.HTTP_201_CREATED, tags=["Internal API"])
+async def receive_inbound_transfer(
+    req: schemas.InboundTransferRequest,
+    db: Session = Depends(get_db)
+    # Nota: ¡Este endpoint NO usa X-User-ID! Es llamado por otro SERVICIO.
+):
+    """
+    Recibe una transferencia desde un servicio externo (ej. otro banco).
+    Busca al usuario por celular y le acredita el saldo.
+    """
+    logger.info(f"Recibiendo transferencia entrante para celular: {req.destination_phone_number}")
+    tx_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    currency = "PEN"
+    recipient_id = None
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            # PASO 1: Resolver Destinatario (AUTH SERVICE)
+            logger.debug(f"Tx {tx_id}: Buscando destinatario por celular: {req.destination_phone_number}")
+            auth_res = await client.get(f"{AUTH_SERVICE_URL}/users/by-phone/{req.destination_phone_number}")
+            auth_res.raise_for_status()
+            recipient_id = int(auth_res.json()["id"])
+
+            # PASO 2: Acreditar Destinatario (BALANCE SERVICE)
+            logger.debug(f"Tx {tx_id}: Acreditando {req.amount} a user_id {recipient_id}")
+            credit_res = await client.post(
+                f"{BALANCE_SERVICE_URL}/balance/credit", 
+                json={"user_id": recipient_id, "amount": req.amount}
+            )
+            credit_res.raise_for_status()
+            logger.info(f"Tx {tx_id}: Crédito a {recipient_id} exitoso.")
+
+        except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code
+            detail = e.response.json().get("detail", "Error en servicios internos.")
+            logger.error(f"Fallo en transferencia entrante: {detail} (Status: {status_code})")
+            raise HTTPException(status_code=status_code, detail=detail)
+        except httpx.RequestError as e:
+            logger.error(f"Error de red en transferencia entrante: {e}", exc_info=True)
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Error de comunicación entre servicios.")
+
+    # PASO 3: Escribir en Cassandra (¡ÉXITO!)
+    try:
+        status_final = "COMPLETED"
+        decimal_amount = Decimal(str(req.amount))
+        metadata = {"external_tx_id": req.external_transaction_id, "sender_bank": "JavaBank"}
+        metadata_json = json.dumps(metadata)
+
+        batch = BatchStatement()
+        q_credit_id = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions (id, user_id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, created_at, updated_at, metadata) VALUES (%s, %s, 'EXTERNAL_BANK', %s, 'BDI', %s, 'DEPOSIT', %s, %s, %s, %s, %s, %s)")
+        q_credit_user = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions_by_user (user_id, created_at, id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, updated_at, metadata) VALUES (%s, %s, %s, 'EXTERNAL_BANK', %s, 'BDI', %s, 'DEPOSIT', %s, %s, %s, %s, %s)")
+        batch.add(q_credit_id, (tx_id, recipient_id, "JavaBank", str(recipient_id), decimal_amount, currency, status_final, now, now, metadata_json))
+        batch.add(q_credit_user, (recipient_id, now, tx_id, "JavaBank", str(recipient_id), decimal_amount, currency, status_final, now, metadata_json))
+        db.execute(batch)
+
+        DEPOSIT_COUNT.inc() # <-- ¡MÉTRICA CORREGIDA!
+
+        tx_data = await get_transaction_by_id(db, tx_id)
+        if not tx_data: raise Exception("No se pudo recuperar la transacción final")
+        return schemas.Transaction(**tx_data)
+
+    except Exception as e:
+        logger.critical(f"¡FALLO CRÍTICO POST-SAGA! Tx {tx_id} (Entrante) tuvo éxito pero Cassandra falló: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "La transferencia se completó pero falló al registrarse.")
+
+# ... (después de 'receive_inbound_transfer')
+
+@app.post("/group-withdrawal", response_model=schemas.Transaction, status_code=status.HTTP_201_CREATED, tags=["Internal SAGA"])
+async def execute_group_withdrawal(
+    req: schemas.GroupWithdrawalRequest,
+    db: Session = Depends(get_db)
+    # NOTA: Esta es una ruta interna servicio-a-servicio.
+    # No necesita 'idempotency_key' (el 'group_service' se encarga)
+    # No necesita 'X-User-ID' (la lógica es interna)
+):
+    """
+    EJECUTA la saga de retiro de grupo APROBADA POR EL LÍDER.
+    1. Debita Balance del Grupo (BDG)
+    2. Acredita Balance del Miembro (BDI)
+    3. Actualiza el Saldo Interno del Miembro (Deuda) en GroupService
+    4. Escribe 2 transacciones en Cassandra
+    """
+    logger.info(f"Ejecutando saga de retiro para request_id: {req.request_id} (Monto: {req.amount})")
+
+    tx_id_debit = uuid.uuid4() # ID para la tx de SALIDA (del grupo)
+    tx_id_credit = uuid.uuid4() # ID para la tx de ENTRADA (al miembro)
+    now = datetime.now(timezone.utc)
+    currency = "PEN"
+    status_final = "FAILED_UNKNOWN" # Default
+
+    # URLs de servicios (deben estar definidas al inicio del archivo)
+    if not BALANCE_SERVICE_URL or not GROUP_SERVICE_URL:
+         logger.error("URLs de servicio internas no configuradas en Ledger!")
+         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error de configuración interna.")
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+
+            # --- PASO 1: Debitar Saldo del Grupo (BDG) ---
+            # (¡Aquí usamos el endpoint que creamos en el Paso 166!)
+            logger.debug(f"Tx {tx_id_debit}: Debitando {req.amount} de group_id {req.group_id}")
+            debit_res = await client.post(
+                f"{BALANCE_SERVICE_URL}/group_balance/debit",
+                json={"group_id": req.group_id, "amount": req.amount}
+            )
+            debit_res.raise_for_status() # Falla aquí si el GRUPO no tiene fondos
+
+            # --- PASO 2: Acreditar Saldo del Miembro (BDI) ---
+            try:
+                logger.debug(f"Tx {tx_id_credit}: Acreditando {req.amount} a user_id {req.member_user_id}")
+                credit_res = await client.post(
+                    f"{BALANCE_SERVICE_URL}/balance/credit",
+                    json={"user_id": req.member_user_id, "amount": req.amount}
+                )
+                credit_res.raise_for_status()
+
+            except Exception as credit_error:
+                logger.error(f"¡FALLO DE SAGA (Retiro)! El crédito al miembro {req.member_user_id} falló. Revertiendo débito del grupo {tx_id_debit}...")
+                # ¡REVERSIÓN! Devolvemos el dinero al grupo.
+                async with httpx.AsyncClient() as revert_client:
+                     await revert_client.post(f"{BALANCE_SERVICE_URL}/group_balance/credit", json={"group_id": req.group_id, "amount": req.amount})
+                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "El servicio de balance del miembro falló. La transacción ha sido revertida.")
+
+            # --- PASO 3: Actualizar Saldo Interno (¡La Deuda!) ---
+            try:
+                logger.debug(f"Tx {tx_id_credit}: Actualizando internal_balance (DEUDA) para user {req.member_user_id}")
+                internal_res = await client.post(
+                    f"{GROUP_SERVICE_URL}/groups/{req.group_id}/member_balance",
+                    json={
+                        "user_id_to_update": req.member_user_id, 
+                        "amount": -req.amount # ¡RESTAMOS el monto! (Genera la deuda)
+                    }
+                )
+                internal_res.raise_for_status()
+
+            except Exception as internal_error:
+                # ¡FALLO CRÍTICO! El dinero se movió pero la deuda no se grabó.
+                # (En un sistema V3.0, revertiríamos todo. Por ahora, solo logueamos.)
+                logger.critical(f"¡FALLO CRÍTICO DE SAGA (Retiro)! El dinero se movió (Tx {tx_id_credit}) pero la deuda en group_service falló: {internal_error}")
+                # No detenemos la transacción, el dinero ya se movió.
+
+            # --- PASO 4: Todo OK ---
+            status_final = "COMPLETED"
+
+    except httpx.HTTPStatusError as e:
+        status_code = e.response.status_code
+        detail = e.response.json().get("detail", "Error en servicios internos.")
+        logger.warning(f"Saga de retiro fallida (Tx: {tx_id_debit}): {detail} (Status: {status_code})")
+        # (Opcional: actualizar el 'withdrawal_request' a REJECTED)
+        raise HTTPException(status_code=status_code, detail=detail)
+
+    # ... (Otros except httpx.RequestError, Exception... se pueden añadir) ...
+
+    # --- PASO 5: Escribir en Cassandra (BATCH) ---
+    if status_final == "COMPLETED":
+        try:
+            decimal_amount = Decimal(str(req.amount))
+            metadata = {"withdrawal_request_id": req.request_id}
+            metadata_json = json.dumps(metadata)
+
+            batch = BatchStatement()
+
+            # Tx de SALIDA (para el historial del GRUPO)
+            q_debit_id = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions (id, user_id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, created_at, updated_at, metadata) VALUES (%s, %s, 'BDG', %s, 'BDI', %s, 'GROUP_WITHDRAWAL', %s, %s, %s, %s, %s, %s)")
+            q_debit_group = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions_by_group (group_id, created_at, id, user_id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, updated_at, metadata) VALUES (%s, %s, %s, %s, 'BDG', %s, 'BDI', %s, 'GROUP_WITHDRAWAL', %s, %s, %s, %s, %s)")
+            batch.add(q_debit_id, (tx_id_debit, req.member_user_id, str(req.group_id), str(req.member_user_id), decimal_amount, currency, status_final, now, now, metadata_json))
+            batch.add(q_debit_group, (req.group_id, now, tx_id_debit, req.member_user_id, str(req.group_id), str(req.member_user_id), decimal_amount, currency, status_final, now, metadata_json))
+
+            # Tx de ENTRADA (para el historial del MIEMBRO)
+            q_credit_id = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions (id, user_id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, created_at, updated_at, metadata) VALUES (%s, %s, 'BDG', %s, 'BDI', %s, 'DEPOSIT', %s, %s, %s, %s, %s, %s)")
+            q_credit_user = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions_by_user (user_id, created_at, id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, updated_at, metadata) VALUES (%s, %s, %s, 'BDG', %s, 'BDI', %s, 'DEPOSIT', %s, %s, %s, %s, %s)")
+            batch.add(q_credit_id, (tx_id_credit, req.member_user_id, str(req.group_id), str(req.member_user_id), decimal_amount, currency, status_final, now, now, metadata_json))
+            batch.add(q_credit_user, (req.member_user_id, now, tx_id_credit, str(req.group_id), str(req.member_user_id), decimal_amount, currency, status_final, now, metadata_json))
+
+            db.execute(batch)
+
+            # Devolvemos la transacción de ENTRADA (la que le importa al miembro)
+            tx_data = await get_transaction_by_id(db, tx_id_credit)
+            if not tx_data: raise Exception("No se pudo recuperar la transacción final")
+            return schemas.Transaction(**tx_data)
+
+        except Exception as e:
+            logger.critical(f"¡FALLO CRÍTICO POST-SAGA! Tx {tx_id_debit} (Retiro) tuvo éxito pero Cassandra falló: {e}", exc_info=True)
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "El retiro se completó pero falló al registrarse.")
+
+    # Si la saga falló antes de "COMPLETED" (ej. 400 Fondos Insuficientes)
+    raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "La saga de retiro falló y no se completó.")
 
 
 
