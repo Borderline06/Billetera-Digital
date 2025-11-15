@@ -2,6 +2,7 @@
 
 from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from typing import Optional, List
+from datetime import datetime # <-- NUEVO
 
 # --- Schemas de Usuario ---
 
@@ -11,6 +12,8 @@ class UserCreate(BaseModel):
     email: EmailStr # <-- CORREGIDO (era 'str')
     password: str = Field(..., min_length=8, description="La contraseña debe tener al menos 8 caracteres")
     phone_number: str = Field(..., min_length=9, max_length=15)
+    # --- NUEVO CAMPO REQUERIDO ---
+    telegram_chat_id: str = Field(..., min_length=5, description="ID de Chat de Telegram del usuario")
 
 class UserResponse(BaseModel):
     """Schema para los datos devueltos tras la creación exitosa de un usuario (excluye contraseña)."""
@@ -32,6 +35,7 @@ class Token(BaseModel):
     user_id: int      # <-- ¡AÑADE ESTO!
     name: str         # <-- ¡AÑADE ESTO!
     email: EmailStr   # <-- ¡AÑADE ESTO!
+    is_phone_verified: bool # <-- NUEVO: Para que el frontend sepa si mostrar pantalla de verificación
 
 class TokenPayload(BaseModel):
     """Schema que representa el payload decodificado de un token JWT válido."""
@@ -43,3 +47,13 @@ class TokenPayload(BaseModel):
 
 class UserBulkRequest(BaseModel):
     user_ids: List[int]
+# --- NUEVO: Schemas de Verificación de Teléfono ---
+
+class PhoneVerificationRequest(BaseModel):
+    """Schema para verificar un código de teléfono."""
+    phone_number: str = Field(..., description="Número de teléfono que se está verificando")
+    code: str = Field(..., min_length=6, max_length=6, description="Código de 6 dígitos")
+
+class RequestVerificationCode(BaseModel):
+    """Schema para solicitar un nuevo código (reenvío)."""
+    phone_number: str
