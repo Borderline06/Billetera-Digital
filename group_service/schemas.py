@@ -16,7 +16,7 @@ class GroupCreate(BaseModel):
 
 class GroupInviteRequest(BaseModel):
     """Schema para invitar. El invitador viene por Header."""
-    user_id_to_invite: int = Field(..., description="ID del usuario a invitar")
+    phone_number_to_invite: str = Field(..., description="Celular del usuario a invitar")
     # El user_id (invitador) vendrá por Header (X-User-ID), NO aquí.
 
 
@@ -29,6 +29,7 @@ class GroupMemberResponse(BaseModel):
     ¡ESTA ES LA ÚNICA DEFINICIÓN!
     """
     user_id: int
+    name: str = "Nombre no encontrado"
     role: GroupRole # Muestra el rol ('leader' o 'member')
     group_id: int  # <-- El campo que faltaba en la definición duplicada
     status: GroupMemberStatus

@@ -6,6 +6,7 @@ from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from fastapi.responses import Response
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from sqlalchemy.orm import Session
+from typing import Optional, List
 
 # Importaciones locales
 from db import engine, Base, get_db
@@ -275,3 +276,17 @@ def get_user_by_phone(phone_number: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Usuario no encontrado con ese número de celular")
     return db_user
 
+# ... (después de 'get_user_by_phone')
+
+@app.post("/users/bulk", response_model=List[schemas.UserResponse], tags=["Users"])
+def get_users_bulk(req: schemas.UserBulkRequest, db: Session = Depends(get_db)):
+    """
+    Obtiene los detalles públicos de una lista de IDs de usuario.
+    Usado por group_service para enriquecer la lista de miembros.
+    """
+    logger.info(f"Solicitud de datos para {len(req.user_ids)} usuarios.")
+
+    # Usamos 'in_' para buscar múltiples IDs a la vez en la BD
+    users = db.query(User).filter(User.id.in_(req.user_ids)).all()
+
+    return users
