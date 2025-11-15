@@ -569,6 +569,62 @@ async def proxy_create_withdrawal_request(
     )
 # --- API Externa v1 (Para Partners como Vercel) ---
 
+# ... (después de 'proxy_create_withdrawal_request') ...
+
+@app.post("/groups/{group_id}/approve-withdrawal/{request_id}", tags=["Groups", "Junta (Retiros)"])
+async def proxy_approve_withdrawal_request(
+    group_id: int, 
+    request_id: int,
+    request: Request, 
+    user_id: int = Depends(get_current_user_id)
+):
+    """Proxy para que un LÍDER apruebe una solicitud de retiro."""
+    logger.info(f"Proxying request to /groups/{group_id}/approve-withdrawal/{request_id} for LÍDER {user_id}")
+
+    return await forward_request(
+        request, 
+        f"{GROUP_URL}/groups/{group_id}/approve-withdrawal/{request_id}",
+        inject_user_id=False,
+        pass_headers=["Authorization"]
+    )
+
+
+# ... (después de 'proxy_create_withdrawal_request') ...
+
+@app.post("/groups/{group_id}/reject-withdrawal/{request_id}", tags=["Groups", "Junta (Retiros)"])
+async def proxy_reject_withdrawal_request(
+    group_id: int, 
+    request_id: int,
+    request: Request, 
+    user_id: int = Depends(get_current_user_id)
+):
+    """Proxy para que un LÍDER rechace una solicitud de retiro."""
+    logger.info(f"Proxying request to /groups/{group_id}/reject-withdrawal/{request_id} for LÍDER {user_id}")
+
+    return await forward_request(
+        request, 
+        f"{GROUP_URL}/groups/{group_id}/reject-withdrawal/{request_id}",
+        inject_user_id=False,
+        pass_headers=["Authorization"]
+    )
+
+@app.get("/groups/{group_id}/withdrawal-requests", tags=["Groups", "Junta (Retiros)"])
+async def proxy_get_withdrawal_requests(
+    group_id: int, 
+    request: Request, 
+    user_id: int = Depends(get_current_user_id)
+):
+    """Proxy para que un LÍDER vea la lista de solicitudes de retiro."""
+    logger.info(f"Proxying request to /groups/{group_id}/withdrawal-requests for LÍDER {user_id}")
+
+    return await forward_request(
+        request, 
+        f"{GROUP_URL}/groups/{group_id}/withdrawal-requests",
+        inject_user_id=False,
+        pass_headers=["Authorization"]
+    )
+
+
 @app.post("/api/v1/inbound-transfer", tags=["Partner API"])
 async def partner_inbound_transfer(
     request: Request,

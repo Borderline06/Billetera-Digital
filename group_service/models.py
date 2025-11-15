@@ -45,6 +45,7 @@ class WithdrawalRequestStatus(str, enum.Enum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
+    COMPLETED = "completed"
     
 class GroupMember(Base):
     """
