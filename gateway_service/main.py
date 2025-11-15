@@ -529,6 +529,40 @@ async def proxy_get_group_balance(
     )
 
 
+# ... (después de la función proxy_get_group_balance) ...
+
+@app.delete("/groups/{group_id}/kick/{user_id_to_kick}", tags=["Groups"])
+async def proxy_kick_member(
+    group_id: int, 
+    user_id_to_kick: int, 
+    request: Request, 
+    user_id: int = Depends(get_current_user_id)
+):
+    """Proxy para que un líder elimine a un miembro."""
+    logger.info(f"Proxying KICK request for group {group_id}, target {user_id_to_kick}, by leader {user_id}")
+    return await forward_request(
+        request, 
+        f"{GROUP_URL}/groups/{group_id}/kick/{user_id_to_kick}",
+        inject_user_id=False,
+        pass_headers=["Authorization"]
+    )
+
+@app.delete("/groups/me/leave/{group_id}", tags=["Groups"])
+async def proxy_leave_group(
+    group_id: int, 
+    request: Request, 
+    user_id: int = Depends(get_current_user_id)
+):
+    """Proxy para que un miembro se salga de un grupo."""
+    logger.info(f"Proxying LEAVE request for group {group_id} by member {user_id}")
+    return await forward_request(
+        request, 
+        f"{GROUP_URL}/groups/me/leave/{group_id}",
+        inject_user_id=False,
+        pass_headers=["Authorization"]
+    )
+
+
 # ... (después de la sección de Grupos) ...
 
 # --- API Externa v1 (Para Partners como Vercel) ---

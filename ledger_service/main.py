@@ -37,6 +37,7 @@ BALANCE_SERVICE_URL = os.getenv("BALANCE_SERVICE_URL")
 INTERBANK_SERVICE_URL = os.getenv("INTERBANK_SERVICE_URL")
 INTERBANK_API_KEY = os.getenv("INTERBANK_API_KEY", "dummy-key-for-dev")
 AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL")
+GROUP_SERVICE_URL = os.getenv("GROUP_SERVICE_URL")
 KEYSPACE = cassandra_db.KEYSPACE
 
 # Configura logger (si no se hizo arriba)
@@ -471,6 +472,15 @@ async def contribute_to_group(
                     json={"group_id": group_id, "amount": amount}
                 )
                 credit_res.raise_for_status() 
+            
+            # --- ¡¡PASO 4: ACTUALIZAR SALDO INTERNO!! ---
+                logger.debug(f"Tx {tx_id_received}: Actualizando internal_balance para user {sender_id}")
+                internal_res = await client.post(
+                    f"{GROUP_SERVICE_URL}/groups/{group_id}/member_balance",
+                    json={"user_id_to_update": sender_id, "amount": amount} # ¡Es un Aporte (positivo)!
+                )
+                internal_res.raise_for_status()
+                # --- FIN PASO 4 ---
 
             except Exception as credit_error:
                 # ¡FALLO DE SAGA! Revertir el débito

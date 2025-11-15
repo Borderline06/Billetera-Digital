@@ -318,3 +318,47 @@ def credit_group_balance(
         db.rollback()
         logger.error(f"Error interno al acreditar a grupo {update_in.group_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al procesar el aporte.")
+
+# ... (después de 'credit_group_balance')
+
+@app.post("/group_balance/debit", response_model=schemas.GroupAccount, tags=["Balance - Grupal"])
+def debit_group_balance(
+    update_in: schemas.GroupBalanceUpdate, 
+    db: Session = Depends(get_db)
+):
+    """
+    Debita (resta) fondos de una cuenta grupal (BDG) con control de fondos.
+    Llamado por 'ledger_service' cuando un líder aprueba un retiro.
+    """
+    logger.info(f"Intentando debitar {update_in.amount} de group_id: {update_in.group_id}")
+    amount_to_debit = Decimal(str(update_in.amount))
+
+    try:
+        with db.begin():
+            account = db.query(models.GroupAccount).filter(
+                models.GroupAccount.group_id == update_in.group_id
+            ).with_for_update().first() 
+
+            if not account:
+                logger.warning(f"Retiro fallido: Cuenta BDG no encontrada para group_id: {update_in.group_id}")
+                raise HTTPException(status.HTTP_404_NOT_FOUND, f"Cuenta de grupo (BDG) no encontrada.")
+
+            # ¡Verificación de fondos del GRUPO!
+            if account.balance < amount_to_debit:
+                logger.warning(f"Retiro fallido: Fondos insuficientes en el grupo {update_in.group_id}")
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "El grupo no tiene fondos suficientes para este retiro.")
+
+            account.balance -= amount_to_debit
+            db.commit() 
+
+        db.refresh(account)
+        logger.info(f"Retiro exitoso. Nuevo balance para group_id {account.group_id}: {account.balance}")
+        return account
+
+    except HTTPException:
+         db.rollback()
+         raise 
+    except Exception as e:
+         db.rollback()
+         logger.error(f"Error interno al debitar de grupo {update_in.group_id}: {e}", exc_info=True)
+         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al procesar el retiro.")
