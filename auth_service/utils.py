@@ -77,9 +77,9 @@ def decode_token(token: str) -> Optional[Dict]:
             algorithms=[ALGORITHM],
             options={"verify_aud": False} 
         )
-       
+    
         if payload.get("exp") and datetime.now(timezone.utc) < datetime.fromtimestamp(payload["exp"], tz=timezone.utc):
-             return payload
+            return payload
         else:
             logger.warning("Fallo en decodificación de token: El token ha expirado.")
             return None
@@ -94,5 +94,5 @@ def decode_token(token: str) -> Optional[Dict]:
 # URL interna para el Balance Service
 BALANCE_SERVICE_URL = os.getenv("BALANCE_SERVICE_URL")
 if not BALANCE_SERVICE_URL:
-     logger.error("Variable de entorno BALANCE_SERVICE_URL no está definida.")
-     
+    logger.error("Variable de entorno BALANCE_SERVICE_URL no está definida.")
+    

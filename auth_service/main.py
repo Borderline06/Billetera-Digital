@@ -290,3 +290,55 @@ def get_users_bulk(req: schemas.UserBulkRequest, db: Session = Depends(get_db)):
     users = db.query(User).filter(User.id.in_(req.user_ids)).all()
 
     return users
+
+@app.post("/users/{user_id}/change-password", tags=["Users"])
+def change_password(
+    user_id: int,
+    req: schemas.PasswordChangeRequest,
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """
+    Permite que un usuario cambie su contraseña proporcionando:
+    - contraseña actual
+    - nueva contraseña
+    - confirmación de nueva contraseña
+    """
+
+    logger.info(f"Solicitud de cambio de contraseña para user_id={user_id}")
+
+    # 1. Validar token → obtener user.id del token
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    authenticated_user_id = int(payload.get("sub"))
+
+    # 2. El usuario solo puede cambiar su propia contraseña
+    if authenticated_user_id != user_id:
+        raise HTTPException(status_code=403, detail="No autorizado para modificar esta cuenta")
+
+    # 3. Buscar usuario
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    # 4. Validar contraseña actual
+    if not verify_password(req.current_password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="La contraseña actual es incorrecta")
+
+    # 5. Validar confirmación
+    if req.new_password != req.confirm_password:
+        raise HTTPException(status_code=400, detail="La nueva contraseña no coincide con la confirmación")
+
+    # 6. No permitir que la nueva sea igual a la actual
+    if verify_password(req.new_password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="La nueva contraseña no puede ser igual a la actual")
+
+    # 7. Hashear la nueva y guardar
+    user.hashed_password = get_password_hash(req.new_password)
+    db.commit()
+
+    logger.info(f"Contraseña actualizada para user_id={user_id}")
+
+    return {"message": "Contraseña actualizada exitosamente"}
