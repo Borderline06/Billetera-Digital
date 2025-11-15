@@ -1,7 +1,7 @@
 """Modelos Pydantic (schemas) para validación de datos de entrada/salida en el Servicio de Autenticación."""
 
 from pydantic import BaseModel, EmailStr, Field, ConfigDict
-from typing import Optional
+from typing import Optional, List
 
 # --- Schemas de Usuario ---
 
@@ -40,3 +40,6 @@ class TokenPayload(BaseModel):
     sub: Optional[str] = None
     exp: Optional[int] = None
     name: Optional[str] = None
+
+class UserBulkRequest(BaseModel):
+    user_ids: List[int]

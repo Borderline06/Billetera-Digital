@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import text
 from fastapi.responses import Response, JSONResponse
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from decimal import Decimal
 
 from db import engine, Base, get_db, SessionLocal
 from models import Group, GroupMember, GroupRole, GroupMemberStatus
@@ -34,11 +35,47 @@ except Exception as e:
 
 app = FastAPI(title="Group Service", version="1.0.0")
 
+AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL")
 # --- (Métricas y Middleware) ---
 REQUEST_COUNT = Counter("group_requests_total", "Total requests", ["method", "endpoint", "status_code"])
 REQUEST_LATENCY = Histogram("group_request_latency_seconds", "Request latency", ["endpoint"])
 GROUP_CREATED_COUNT = Counter("group_groups_created_total", "Grupos creados")
 MEMBER_INVITED_COUNT = Counter("group_members_invited_total", "Miembros invitados")
+
+
+
+
+
+# ... (cerca de 'logger = ...')
+
+def fetch_user_details_bulk(user_ids: List[int]) -> dict:
+    """
+    Llama al auth_service para obtener nombres y emails de una lista de IDs.
+    Devuelve un diccionario: {1: "Jorge", 2: "Amigo"}
+    """
+    if not AUTH_SERVICE_URL:
+        logger.error("AUTH_SERVICE_URL no está configurado. No se pueden obtener nombres.")
+        return {}
+
+    try:
+        with httpx.Client() as client:
+            response = client.post(f"{AUTH_SERVICE_URL}/users/bulk", json={"user_ids": user_ids})
+            response.raise_for_status()
+            users_data = response.json()
+
+            # Convierte la lista de usuarios en un diccionario para búsqueda rápida
+            # ej: {1: "Jorge P", 2: "Amigo Test"}
+            return {user['id']: user['name'] for user in users_data}
+
+    except Exception as e:
+        logger.error(f"Error al llamar a /users/bulk: {e}", exc_info=True)
+        return {}
+
+
+
+
+
+
 
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
@@ -157,27 +194,61 @@ def create_group(
         logger.error(f"Error interno al crear grupo '{group_in.name}': {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno del servidor al crear grupo.")
 
+# REEMPLAZA tu función get_my_groups entera con esto:
+
 @app.get("/groups/me", response_model=List[schemas.GroupResponse], tags=["Groups"])
 def get_my_groups(
-    x_user_id: int = Header(..., alias="X-User-ID"), 
+    x_user_id: int = Header(..., alias="X-User-ID"),
     db: Session = Depends(get_db)
 ):
     """
     Obtiene la lista de grupos a los que pertenece el usuario autenticado.
+    (Ahora enriquecida con los nombres de los miembros).
     """
-    requesting_user_id = x_user_id 
+    requesting_user_id = x_user_id
     if not requesting_user_id:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "User ID no autenticado")
 
     logger.info(f"Buscando grupos para user_id: {requesting_user_id}")
 
     try:
-        groups = db.query(models.Group).join(
-        models.GroupMember
+        # --- ¡AQUÍ SE DEFINE 'groups_db'! ---
+        # 1. Obtener los objetos de grupo desde la BD
+        groups_db = db.query(models.Group).join(
+            models.GroupMember
         ).filter(
             models.GroupMember.user_id == requesting_user_id
         ).all()
-        return groups
+
+        if not groups_db:
+            return [] # Devuelve lista vacía si no pertenece a ningún grupo
+
+        # --- ¡INICIO DE LA NUEVA LÓGICA! ---
+
+        # 2. Obtener TODOS los IDs de TODOS los miembros de TODOS los grupos
+        all_member_ids = set()
+        for group in groups_db: # <-- Usamos groups_db
+            for member in group.members:
+                all_member_ids.add(member.user_id)
+
+        # 3. Llamar a auth_service UNA SOLA VEZ
+        user_names_map = fetch_user_details_bulk(list(all_member_ids))
+
+        # 4. Fusionar los datos
+        response_list = []
+        for group in groups_db: # <-- Usamos groups_db
+            # Convertimos el objeto SQLAlchemy (group) a un diccionario Pydantic (schema)
+            group_schema = schemas.GroupResponse.model_validate(group)
+
+            # Asignamos los nombres
+            for member_schema in group_schema.members:
+                member_schema.name = user_names_map.get(member_schema.user_id, "Usuario Desconocido")
+
+            response_list.append(group_schema)
+
+        return response_list
+        # --- FIN DE LA NUEVA LÓGICA ---
+
     except Exception as e:
         logger.error(f"Error al obtener grupos para user_id {requesting_user_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al obtener grupos")
@@ -223,55 +294,261 @@ def accept_group_invitation(
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error al aceptar la invitación.")
 
 
-@app.post("/groups/{group_id}/invite", response_model=schemas.GroupMemberResponse, status_code=status.HTTP_201_CREATED, tags=["Groups"])
-def invite_member(
-    group_id: int, 
-    invite_in: schemas.GroupInviteRequest, 
-    x_user_id: int = Header(..., alias="X-User-ID"),
+# ... (después de la función accept_group_invitation) ...
+
+@app.delete("/groups/me/reject/{group_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Groups"])
+def reject_group_invitation(
+    group_id: int,
+    x_user_id: int = Header(..., alias="X-User-ID"), # ID del usuario (el invitado)
     db: Session = Depends(get_db)
 ):
     """
-    Añade un usuario (por ID) como miembro a un grupo existente.
-    Requiere que el solicitante (X-User-ID) sea el líder del grupo.
+    Permite al usuario autenticado (X-User-ID) rechazar (eliminar) una
+    invitación pendiente a un grupo.
     """
-    requesting_user_id = x_user_id 
-    user_to_invite_id = invite_in.user_id_to_invite
+    rejecting_user_id = x_user_id
+    logger.info(f"Usuario {rejecting_user_id} intentando rechazar invitación al grupo {group_id}")
 
-    if not requesting_user_id:
-         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "User ID no autenticado (no se encontró X-User-ID)")
+    # 1. Buscar la membresía pendiente
+    membership = db.query(models.GroupMember).filter(
+        models.GroupMember.group_id == group_id,
+        models.GroupMember.user_id == rejecting_user_id
+    ).first()
 
-    logger.info(f"Usuario {requesting_user_id} intentando invitar a user_id {user_to_invite_id} al grupo {group_id}")
+    if not membership:
+        logger.warning(f"Intento de rechazar invitación inexistente al grupo {group_id} por user {rejecting_user_id}")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Invitación no encontrada.")
 
+    if membership.status == models.GroupMemberStatus.ACTIVE:
+        logger.warning(f"Usuario {rejecting_user_id} intentó rechazar invitación al grupo {group_id} pero ya estaba activo.")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No puedes rechazar una invitación que ya has aceptado.")
+
+    # 2. Eliminar la membresía 'pending' de la base de datos
+    try:
+        db.delete(membership)
+        db.commit()
+        logger.info(f"Usuario {rejecting_user_id} rechazó exitosamente la invitación al grupo {group_id}.")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error al eliminar membresía 'pending' para user {rejecting_user_id} en grupo {group_id}: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error al rechazar la invitación.")
+
+
+
+# ... (después de 'reject_group_invitation')
+
+@app.post("/groups/{group_id}/member_balance", response_model=schemas.GroupMemberResponse, tags=["Groups"])
+def update_member_internal_balance(
+    group_id: int,
+    req: schemas.InternalBalanceUpdate,
+   
+    db: Session = Depends(get_db)
+):
+    """
+    Actualiza el 'internal_balance' de un miembro (SUMA en aportes, RESTA en retiros).
+    Llamado SOLAMENTE por el ledger_service durante una saga.
+    """
+    # (En un futuro, verificaríamos que quien llama es el ledger_service)
+    logger.info(f"Actualizando internal_balance para user {req.user_id_to_update} en grupo {group_id} por un monto de {req.amount}")
+
+    try:
+        with db.begin():
+            membership = db.query(models.GroupMember).filter(
+                models.GroupMember.group_id == group_id,
+                models.GroupMember.user_id == req.user_id_to_update
+            ).with_for_update().first()
+
+            if not membership:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Membresía no encontrada para actualizar saldo interno.")
+
+            membership.internal_balance += Decimal(str(req.amount))
+            db.commit()
+
+        db.refresh(membership)
+        return membership
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error al actualizar internal_balance: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error al actualizar saldo interno.")
+
+
+# ... (después de 'update_member_internal_balance')
+
+@app.delete("/groups/{group_id}/kick/{user_id_to_kick}", status_code=status.HTTP_204_NO_CONTENT, tags=["Groups"])
+def kick_member(
+    group_id: int,
+    user_id_to_kick: int,
+    x_user_id: int = Header(..., alias="X-User-ID"), # ID del LÍDER
+    db: Session = Depends(get_db)
+):
+    """
+    Permite al líder del grupo (X-User-ID) eliminar a otro miembro.
+    RESTRICCIÓN: No se puede eliminar a un miembro con deuda (saldo interno < 0).
+    """
+    leader_user_id = x_user_id
+    logger.info(f"Líder {leader_user_id} intentando eliminar a user {user_id_to_kick} del grupo {group_id}")
+
+    # 1. Verificar que quien llama es el líder
     group = db.query(models.Group).filter(models.Group.id == group_id).first()
     if not group:
-        logger.warning(f"Intento de invitar a grupo inexistente: {group_id}")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Grupo no encontrado.")
+    if group.leader_user_id != leader_user_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Solo el líder del grupo puede eliminar miembros.")
+
+    # 2. No puedes eliminarte a ti mismo (el líder)
+    if group.leader_user_id == user_id_to_kick:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "El líder no puede eliminarse a sí mismo.")
+
+    # 3. Encontrar al miembro que se va a eliminar
+    membership_to_kick = db.query(models.GroupMember).filter(
+        models.GroupMember.group_id == group_id,
+        models.GroupMember.user_id == user_id_to_kick
+    ).first()
+
+    if not membership_to_kick:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Miembro a eliminar no encontrado en este grupo.")
+
+    # 4. ¡¡LA RESTRICCIÓN DE LA JUNTA!!
+    if membership_to_kick.internal_balance < Decimal('0.00'):
+        logger.warning(f"Líder {leader_user_id} no puede eliminar a user {user_id_to_kick}, tiene deuda.")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"No se puede eliminar al miembro: tiene un saldo interno negativo (debe: {membership_to_kick.internal_balance}).")
+
+    # 5. Todo en orden, eliminar al miembro
+    try:
+        db.delete(membership_to_kick)
+        db.commit()
+        logger.info(f"Miembro {user_id_to_kick} eliminado exitosamente del grupo {group_id}.")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error al eliminar miembro: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al eliminar miembro.")
+
+
+@app.delete("/groups/me/leave/{group_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Groups"])
+def leave_group(
+    group_id: int,
+    x_user_id: int = Header(..., alias="X-User-ID"), # ID del Miembro
+    db: Session = Depends(get_db)
+):
+    """
+    Permite a un miembro (X-User-ID) salirse de un grupo.
+    RESTRICCIÓN: No puede salirse si es el líder o si tiene deuda.
+    """
+    member_user_id = x_user_id
+    logger.info(f"Miembro {member_user_id} intentando salirse del grupo {group_id}")
+
+    # 1. Encontrar la membresía
+    membership = db.query(models.GroupMember).filter(
+        models.GroupMember.group_id == group_id,
+        models.GroupMember.user_id == member_user_id
+    ).first()
+
+    if not membership:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No eres miembro de este grupo.")
+
+    # 2. Restricción: El líder no puede "salirse"
+    if membership.role == models.GroupRole.LEADER:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "El líder no puede abandonar el grupo. Debe eliminarlo.")
+
+    # 3. ¡¡LA RESTRICCIÓN DE LA JUNTA!!
+    if membership.internal_balance < Decimal('0.00'):
+        logger.warning(f"Miembro {member_user_id} no puede salirse del grupo {group_id}, tiene deuda.")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"No puedes salir del grupo: tu saldo interno es negativo (debes: {membership.internal_balance}).")
+
+    # 4. Todo en orden, salirse del grupo
+    try:
+        db.delete(membership)
+        db.commit()
+        logger.info(f"Miembro {member_user_id} se salió exitosamente del grupo {group_id}.")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error al salirse de grupo: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al salirse del grupo.")
+
+
+# REEMPLAZA la función 'invite_member' entera con esto:
+
+@app.post("/groups/{group_id}/invite", response_model=schemas.GroupMemberResponse, status_code=status.HTTP_201_CREATED, tags=["Groups"])
+def invite_member(
+    group_id: int, 
+    invite_in: schemas.GroupInviteRequest, # <-- Recibe 'phone_number_to_invite'
+    x_user_id: int = Header(..., alias="X-User-ID"), # Este es el LÍDER (quien invita)
+    db: Session = Depends(get_db)
+):
+    """
+    Invita a un usuario a un grupo usando su NÚMERO DE CELULAR.
+    Requiere que el solicitante (X-User-ID) sea el líder del grupo.
+    """
+    leader_user_id = x_user_id 
+    phone_to_invite = invite_in.phone_number_to_invite
+    user_id_to_invite = None # Lo averiguaremos
+
+    if not leader_user_id:
+         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "User ID no autenticado (no se encontró X-User-ID)")
+
+    logger.info(f"Líder {leader_user_id} intentando invitar al celular {phone_to_invite} al grupo {group_id}")
+
+    # --- ¡NUEVA LÓGICA DE BÚSQUEDA! ---
+    if not AUTH_SERVICE_URL:
+        logger.error("¡AUTH_SERVICE_URL no está configurada! No se puede invitar por celular.")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Configuración del servicio incompleta.")
+
+    try:
+        with httpx.Client() as client:
+            response = client.get(f"{AUTH_SERVICE_URL}/users/by-phone/{phone_to_invite}")
+
+            if response.status_code == 404:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, f"Usuario con celular {phone_to_invite} no encontrado.")
+
+            response.raise_for_status() # Lanza error si auth_service falló
+            user_data = response.json()
+            user_id_to_invite = user_data['id']
+
+    except HTTPException as http_exc:
+        raise http_exc # Re-lanzamos el 404
+    except httpx.RequestError as e:
+        logger.error(f"Error al contactar Auth Service para invitar: {e}")
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Error al contactar el servicio de usuarios.")
+    # --- FIN DE LA NUEVA LÓGICA ---
+
+    if not user_id_to_invite: # Doble chequeo
+         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "No se pudo obtener el ID del usuario invitado.")
+
+    # Evitar auto-invitaciones
+    if user_id_to_invite == leader_user_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No puedes invitarte a ti mismo a tu propio grupo.")
+
+    # --- Lógica Antigua (Ahora funciona con el user_id que encontramos) ---
+    group = db.query(models.Group).filter(models.Group.id == group_id).first()
+    if not group:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Grupo con id {group_id} no encontrado.")
 
-    if group.leader_user_id != requesting_user_id:
-        logger.warning(f"Intento no autorizado de invitar al grupo {group_id} por user {requesting_user_id} (no es líder).")
+    if group.leader_user_id != leader_user_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Solo el líder del grupo puede invitar miembros.")
 
     existing_member = db.query(models.GroupMember).filter(
         models.GroupMember.group_id == group_id,
-        models.GroupMember.user_id == user_to_invite_id
+        models.GroupMember.user_id == user_id_to_invite
     ).first()
 
     if existing_member:
-        logger.warning(f"Intento de invitar a usuario {user_to_invite_id} que ya es miembro del grupo {group_id}.")
-        raise HTTPException(status.HTTP_409_CONFLICT, "El usuario ya es miembro de este grupo.")
+        raise HTTPException(status.HTTP_409_CONFLICT, "El usuario ya es miembro de este grupo (o la invitación está pendiente).")
 
     new_member = models.GroupMember(
         group_id=group_id,
-        user_id=user_to_invite_id,
+        user_id=user_id_to_invite,
         role=models.GroupRole.MEMBER,
-        status=models.GroupMemberStatus.PENDING
+        status=models.GroupMemberStatus.PENDING # Invitación queda pendiente
     )
 
     try:
         db.add(new_member)
         db.commit()
         db.refresh(new_member)
-        logger.info(f"Usuario {user_to_invite_id} añadido exitosamente al grupo {group_id} como miembro.")
+        logger.info(f"Usuario {user_id_to_invite} invitado exitosamente al grupo {group_id} (pendiente).")
         MEMBER_INVITED_COUNT.inc()
         return new_member
     except Exception as e:
@@ -308,7 +585,22 @@ def get_group_details(
          logger.warning(f"Acceso denegado: Usuario {requesting_user_id} intentó ver grupo {group_id} (no es miembro).")
          raise HTTPException(status.HTTP_403_FORBIDDEN, "Acceso denegado. No eres miembro de este grupo.")
 
-    logger.info(f"Devolviendo detalles del grupo {group_id} a user_id {requesting_user_id}")
-    return group
+    # --- ¡INICIO DE LA NUEVA LÓGICA! ---
+    # 1. Obtener todos los IDs de los miembros
+    member_ids = [member.user_id for member in group.members]
 
+    # 2. Llamar a auth_service para obtener los nombres
+    user_names_map = fetch_user_details_bulk(member_ids)
+
+    # 3. "Fusionar" los nombres en la respuesta
+    # Convertimos el objeto SQLAlchemy (group) a un diccionario Pydantic (schema)
+    group_response = schemas.GroupResponse.model_validate(group)
+
+    # 4. Asignar los nombres
+    for member_schema in group_response.members:
+        member_schema.name = user_names_map.get(member_schema.user_id, "Usuario Desconocido")
+
+    logger.info(f"Devolviendo detalles enriquecidos del grupo {group_id}")
+    return group_response
+    # --- FIN DE LA NUEVA LÓGICA ---
 # ... (después de la función get_group_details)
