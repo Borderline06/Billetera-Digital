@@ -5,7 +5,7 @@ import time
 import models
 from decimal import Decimal
 from fastapi import FastAPI, Depends, HTTPException, status, Request, Header
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import text
 from fastapi.responses import Response
@@ -140,7 +140,9 @@ def create_account(account_in: schemas.AccountCreate, db: Session = Depends(get_
 def get_balance(user_id: int, db: Session = Depends(get_db)):
     """Obtiene los detalles y saldo de una cuenta individual (BDI)."""
     logger.debug(f"Solicitud de saldo para user_id: {user_id}")
-    account = db.query(Account).filter(Account.user_id == user_id).first()
+    account = db.query(Account).options(
+    joinedload(Account.loan) # <-- ¡Carga el préstamo relacionado!
+    ).filter(Account.user_id == user_id).first()
     if not account:
         logger.warning(f"Cuenta no encontrada para user_id: {user_id}")
         raise HTTPException(
@@ -429,3 +431,61 @@ def request_loan(
         db.rollback()
         logger.error(f"Error al procesar préstamo para {user_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al procesar el préstamo.")
+    
+# ... (después de 'request_loan')
+
+@app.post("/pay-loan", response_model=schemas.LoanResponse, tags=["BDI Préstamos"])
+def pay_loan(
+    x_user_id: int = Header(..., alias="X-User-ID"),
+    db: Session = Depends(get_db)
+):
+    """
+    Permite a un usuario (BDI) pagar su préstamo activo.
+    RESTRICCIÓN: Solo si tiene saldo (balance) suficiente.
+    """
+    user_id = x_user_id
+    logger.info(f"Usuario {user_id} intentando pagar su préstamo.")
+
+    try:
+        with db.begin():
+            # 1. Bloquear AMBAS tablas (Cuenta y Préstamo)
+            account = db.query(models.Account).filter(models.Account.user_id == user_id).with_for_update().first()
+            loan = db.query(models.Loan).filter(
+                models.Loan.user_id == user_id,
+                models.Loan.status == models.LoanStatus.ACTIVE
+            ).with_for_update().first()
+
+            if not account:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Tu cuenta de saldo no fue encontrada.")
+            if not loan:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "No se encontró ningún préstamo activo para pagar.")
+
+            amount_to_pay = loan.outstanding_balance
+
+            # 2. ¡RESTRICCIÓN! Verificar fondos
+            if account.balance < amount_to_pay:
+                logger.warning(f"Pago de préstamo fallido: Fondos insuficientes para user_id: {user_id}")
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Fondos insuficientes. Necesitas S/ {amount_to_pay} para pagar.")
+
+            # 3. ¡Éxito! Mover el dinero
+            account.balance -= amount_to_pay # Restar de BDI
+            loan.outstanding_balance = Decimal('0.00') # Pagar deuda
+            loan.status = models.LoanStatus.PAID # Marcar como pagado
+
+            db.commit()
+
+        db.refresh(loan)
+
+        # 4. (Falta Paso 4) ¡Llamar al Ledger para registrar este pago!
+        # (Lo haremos después, por ahora la deuda está pagada)
+
+        logger.info(f"Préstamo {loan.id} pagado exitosamente por {user_id}.")
+        return loan
+
+    except HTTPException as http_exc:
+        db.rollback()
+        raise http_exc
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error al pagar préstamo para {user_id}: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al pagar el préstamo.")

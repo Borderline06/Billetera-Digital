@@ -1,9 +1,10 @@
-"""Define los modelos de las tablas 'accounts' y 'group_accounts' usando SQLAlchemy ORM."""
-from sqlalchemy import Column, Integer, String, Float, UniqueConstraint, ForeignKey, Numeric, DateTime, func, Enum as SQLEnum
-from decimal import Decimal
 import enum
-# Importación absoluta desde el módulo db.py del mismo directorio
+from decimal import Decimal
+from sqlalchemy import Column, Integer, String, Float, UniqueConstraint, ForeignKey, Numeric, DateTime, func, Enum as SQLEnum
+from sqlalchemy.orm import relationship # <-- ¡ESTA ES LA LÍNEA CORRECTA!
+
 from db import Base
+# ... (el resto de tu archivo 'models.py' se queda igual) ...
 
 class Account(Base):
     """
@@ -23,8 +24,12 @@ class Account(Base):
     # NOTA: Float se usa por simplicidad; en producción se recomienda usar Decimal para precisión monetaria.
     balance = Column(Numeric(10, 2), nullable=False, default=Decimal('0.00'))
 
+    version = Column(Integer, nullable=False, default=1, server_default='1')
+
     # Moneda de la cuenta 
-    currency = Column(String(10), nullable=False, default="USD")
+    currency = Column(String(10), nullable=False, default="PEN")
+
+    loan = relationship("Loan", uselist=False, back_populates="account", primaryjoin="Account.user_id == Loan.user_id")
 
 
 class GroupAccount(Base):
@@ -67,3 +72,4 @@ class Loan(Base):
     status = Column(SQLEnum(LoanStatus), nullable=False, default=LoanStatus.ACTIVE)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     due_date = Column(DateTime(timezone=True), nullable=True) # (Para V2: fecha de pago)
+    account = relationship("Account", back_populates="loan", foreign_keys=[user_id])

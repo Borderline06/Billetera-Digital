@@ -318,6 +318,25 @@ async def proxy_request_loan(
         pass_headers=["Authorization", "Idempotency-Key"] # Pasamos la Idempotency-Key
     )
 
+# ... (después de 'proxy_request_loan')
+
+@app.post("/pay-loan", tags=["Ledger", "BDI Préstamos"])
+async def proxy_pay_loan(
+    request: Request, 
+    user_id: int = Depends(get_current_user_id)
+):
+    """Proxy para que un usuario pague su préstamo."""
+    logger.info(f"Proxying request to /pay-loan for user_id: {user_id}")
+
+    # Esta llamada SÍ necesita el X-User-ID
+    return await forward_request(
+        request, 
+        f"{BALANCE_URL}/pay-loan",
+        inject_user_id=False,
+        pass_headers=["Authorization", "Idempotency-Key"] 
+    )
+
+
 @app.post("/ledger/transfer", tags=["Ledger"])
 async def proxy_transfer(request: Request, user_id: int = Depends(get_current_user_id)):
     """Reenvía la solicitud de transferencia al servicio de ledger, inyectando user_id."""
