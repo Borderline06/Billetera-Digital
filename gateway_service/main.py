@@ -625,6 +625,25 @@ async def proxy_get_withdrawal_requests(
     )
 
 
+# ... (después de 'proxy_get_withdrawal_requests') ...
+
+@app.post("/groups/{group_id}/leader-withdrawal", tags=["Groups", "Junta (Retiros)"])
+async def proxy_leader_withdrawal(
+    group_id: int, 
+    request: Request, 
+    user_id: int = Depends(get_current_user_id)
+):
+    """Proxy para que un LÍDER ejecute un retiro directo."""
+    logger.info(f"Proxying request to /groups/{group_id}/leader-withdrawal for LÍDER {user_id}")
+
+    return await forward_request(
+        request, 
+        f"{GROUP_URL}/groups/{group_id}/leader-withdrawal",
+        inject_user_id=False,
+        pass_headers=["Authorization"]
+    )
+
+
 @app.post("/api/v1/inbound-transfer", tags=["Partner API"])
 async def partner_inbound_transfer(
     request: Request,

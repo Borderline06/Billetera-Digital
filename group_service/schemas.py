@@ -71,3 +71,8 @@ class WithdrawalRequestResponse(BaseModel):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+class LeaderWithdrawalRequest(BaseModel):
+    """Schema para la solicitud de un LÍDER para retirar fondos."""
+    amount: float = Field(..., gt=0, description="Monto a retirar")
+    reason: Optional[str] = Field(None, max_length=255, description="Razón del retiro")
