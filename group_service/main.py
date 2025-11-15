@@ -15,7 +15,7 @@ from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_
 from decimal import Decimal
 
 from db import engine, Base, get_db, SessionLocal
-from models import Group, GroupMember, GroupRole, GroupMemberStatus
+from models import Group, GroupMember, GroupRole, GroupMemberStatus, WithdrawalRequest, WithdrawalRequestStatus
 from typing import Optional, List
 from dotenv import load_dotenv
 load_dotenv()
@@ -469,6 +469,82 @@ def leave_group(
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al salirse del grupo.")
 
 
+# ... (después de 'leave_group')
+
+@app.delete("/groups/{group_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Groups"])
+def delete_group(
+    group_id: int,
+    x_user_id: int = Header(..., alias="X-User-ID"), # ID del LÍDER
+    db: Session = Depends(get_db)
+):
+    """
+    Permite al líder del grupo (X-User-ID) eliminar el grupo.
+    RESTRICCIÓN: Solo si el saldo del grupo es 0 Y ningún miembro tiene deuda.
+    """
+    leader_user_id = x_user_id
+    logger.info(f"Líder {leader_user_id} intentando ELIMINAR el grupo {group_id}")
+
+    # 1. Verificar que quien llama es el líder
+    group = db.query(models.Group).options(joinedload(models.Group.members)).filter(
+        models.Group.id == group_id,
+        models.Group.leader_user_id == leader_user_id
+    ).first()
+
+    if not group:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Grupo no encontrado o no eres el líder.")
+
+    # 2. ¡REGLA DE DEUDA! Verificar saldos internos
+    for member in group.members:
+        if member.internal_balance < Decimal('0.00'):
+            logger.warning(f"No se puede eliminar el grupo {group_id}. El miembro {member.user_id} tiene deuda.")
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"No se puede eliminar el grupo: El miembro con ID {member.user_id} tiene un saldo interno negativo (debe: {member.internal_balance}).")
+
+    # 3. ¡REGLA DE DINERO! Verificar saldo total del grupo (llamada al balance_service)
+    if not BALANCE_SERVICE_URL:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error de configuración: BALANCE_SERVICE_URL no definida.")
+
+    try:
+        with httpx.Client() as client:
+            response = client.get(f"{BALANCE_SERVICE_URL}/group_balance/{group_id}")
+            response.raise_for_status() # Lanza error si falla
+            balance_data = response.json()
+
+            if Decimal(str(balance_data.get("balance", 0))) > Decimal('0.00'):
+                logger.warning(f"No se puede eliminar el grupo {group_id}. Todavía tiene saldo: {balance_data.get('balance')}")
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "No se puede eliminar el grupo: el saldo total debe ser S/ 0.00.")
+
+    except httpx.HTTPStatusError as e:
+         raise HTTPException(status_code=e.response.status_code, detail=f"Error al verificar saldo del grupo: {e.response.json().get('detail')}")
+    except httpx.RequestError as e:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Error de red al contactar Balance Service: {e}")
+
+    # ... (después de la verificación de saldo de httpx) ...
+
+    # 4. ¡Todo en orden! Eliminar
+    try:
+        # group.members ya fue cargado por el 'joinedload' al inicio de la función
+
+        # a. Eliminar todas las membresías (la forma correcta)
+        for member in group.members:
+            db.delete(member)
+
+        # b. Eliminar el grupo (ahora que no tiene miembros, esto SÍ funciona)
+        db.delete(group)
+
+        # c. Confirmar los cambios
+        db.commit()
+
+        # d. (Opcional) Llamar a balance_service para borrar la group_account
+        # (Lo omitimos por ahora)
+
+        logger.info(f"Grupo {group_id} y sus {len(group.members)} membresías eliminados exitosamente.")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error al eliminar grupo de la BD: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al eliminar el grupo.")
+
 # REEMPLAZA la función 'invite_member' entera con esto:
 
 @app.post("/groups/{group_id}/invite", response_model=schemas.GroupMemberResponse, status_code=status.HTTP_201_CREATED, tags=["Groups"])
@@ -604,3 +680,52 @@ def get_group_details(
     return group_response
     # --- FIN DE LA NUEVA LÓGICA ---
 # ... (después de la función get_group_details)
+
+
+# ... (después de 'delete_group')
+
+@app.post("/groups/{group_id}/request-withdrawal", response_model=schemas.WithdrawalRequestResponse, status_code=status.HTTP_201_CREATED, tags=["Junta (Retiros)"])
+def create_withdrawal_request(
+    group_id: int,
+    req: schemas.WithdrawalRequestCreate,
+    x_user_id: int = Header(..., alias="X-User-ID"), # ID del Miembro que solicita
+    db: Session = Depends(get_db)
+):
+    """
+    Permite a un miembro ACTIVO crear una solicitud de retiro.
+    Esto queda PENDIENTE hasta que el líder lo apruebe.
+    """
+    member_user_id = x_user_id
+    logger.info(f"Miembro {member_user_id} solicitando retiro de {req.amount} del grupo {group_id}")
+
+    # 1. Verificar que el solicitante es un miembro activo
+    membership = db.query(models.GroupMember).filter(
+        models.GroupMember.group_id == group_id,
+        models.GroupMember.user_id == member_user_id,
+        models.GroupMember.status == models.GroupMemberStatus.ACTIVE
+    ).first()
+
+    if not membership:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "No eres un miembro activo de este grupo.")
+
+    # 2. (Opcional) Verificar si el grupo tiene fondos suficientes (chequeo rápido)
+    # (Lo omitimos por ahora, la verificación final la hará el líder al aprobar)
+
+    # 3. Crear la solicitud de retiro
+    try:
+        new_request = models.WithdrawalRequest(
+            group_id=group_id,
+            member_user_id=member_user_id,
+            amount=Decimal(str(req.amount)),
+            reason=req.reason,
+            status=models.WithdrawalRequestStatus.PENDING
+        )
+        db.add(new_request)
+        db.commit()
+        db.refresh(new_request)
+        logger.info(f"Solicitud de retiro {new_request.id} creada exitosamente.")
+        return new_request
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error al crear solicitud de retiro: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al crear la solicitud.")

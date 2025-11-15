@@ -531,8 +531,42 @@ async def proxy_leave_group(
     )
 
 
-# ... (después de la sección de Grupos) ...
+# ... (después de la función proxy_leave_group) ...
 
+@app.delete("/groups/{group_id}", tags=["Groups"])
+async def proxy_delete_group(
+    group_id: int, 
+    request: Request, 
+    user_id: int = Depends(get_current_user_id)
+):
+    """Proxy para que un líder elimine su grupo."""
+    logger.info(f"Proxying DELETE request for group {group_id} by leader {user_id}")
+    return await forward_request(
+        request, 
+        f"{GROUP_URL}/groups/{group_id}",
+        inject_user_id=False,
+        pass_headers=["Authorization"]
+    )
+
+# ... (después de la sección de Grupos) ...
+# ... (después de la función proxy_delete_group) ...
+
+@app.post("/groups/{group_id}/request-withdrawal", tags=["Groups", "Junta (Retiros)"])
+async def proxy_create_withdrawal_request(
+    group_id: int, 
+    request: Request, 
+    user_id: int = Depends(get_current_user_id)
+):
+    """Proxy para que un miembro solicite un retiro de fondos del grupo."""
+    logger.info(f"Proxying request to /groups/{group_id}/request-withdrawal for user_id: {user_id}")
+
+    # El X-User-ID (del miembro) se añade automáticamente
+    return await forward_request(
+        request, 
+        f"{GROUP_URL}/groups/{group_id}/request-withdrawal",
+        inject_user_id=False,
+        pass_headers=["Authorization"]
+    )
 # --- API Externa v1 (Para Partners como Vercel) ---
 
 @app.post("/api/v1/inbound-transfer", tags=["Partner API"])
