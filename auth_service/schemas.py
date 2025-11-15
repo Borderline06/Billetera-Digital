@@ -47,6 +47,11 @@ class TokenPayload(BaseModel):
 
 class UserBulkRequest(BaseModel):
     user_ids: List[int]
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
+    confirm_password: str
 # --- NUEVO: Schemas de Verificación de Teléfono ---
 
 class PhoneVerificationRequest(BaseModel):

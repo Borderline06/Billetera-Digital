@@ -89,9 +89,9 @@ def decode_token(token: str) -> Optional[Dict]:
             algorithms=[ALGORITHM],
             options={"verify_aud": False} 
         )
-       
+    
         if payload.get("exp") and datetime.now(timezone.utc) < datetime.fromtimestamp(payload["exp"], tz=timezone.utc):
-             return payload
+            return payload
         else:
             logger.warning("Fallo en decodificación de token: El token ha expirado.")
             return None

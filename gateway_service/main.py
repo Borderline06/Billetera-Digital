@@ -309,6 +309,21 @@ async def proxy_get_my_profile(request: Request, user_id: int = Depends(get_curr
     logger.info(f"Proxying request to /users/{user_id}")
     return await forward_request(request, f"{AUTH_URL}/users/{user_id}")
 
+@app.post("/auth/change-password", tags=["Authentication"])
+async def proxy_change_password(request: Request, user_id: int = Depends(get_current_user_id)):
+    """
+    Proxy que permite a un usuario autenticado cambiar su contraseña.
+    Reenvía la solicitud al endpoint:
+      POST auth_service/users/{user_id}/change-password
+    """
+
+    logger.info(f"Proxying request to /users/{user_id}/change-password")
+
+    return await forward_request(
+        request,
+        f"{AUTH_URL}/users/{user_id}/change-password"
+    )
+
 # --- Endpoints Privados (Proxy para Balance) ---
 
 @app.get("/balance/me", tags=["Balance"])
@@ -511,6 +526,8 @@ async def proxy_invite_member(group_id: int, request: Request, user_id: int = De
         inject_user_id=False, 
         pass_headers=["Authorization"]
     )
+
+
 
 @app.get("/groups/{group_id}", tags=["Groups"])
 async def proxy_get_group(group_id: int, request: Request, user_id: int = Depends(get_current_user_id)):
