@@ -300,11 +300,23 @@ async def proxy_get_my_balance(request: Request, user_id: int = Depends(get_curr
 
 # --- Endpoints Privados (Proxy para Ledger) ---
 
-@app.post("/ledger/deposit", tags=["Ledger"])
-async def proxy_deposit(request: Request, user_id: int = Depends(get_current_user_id)):
-    """Reenvía la solicitud de depósito al servicio de ledger, inyectando user_id."""
-    logger.info(f"Proxying request to /ledger/deposit for user_id: {user_id}")
-    return await forward_request(request, f"{LEDGER_URL}/deposit", inject_user_id=True, pass_headers=["Idempotency-Key", "Authorization"])
+# (¡Borra el endpoint 'proxy_deposit'!)
+
+@app.post("/request-loan", tags=["Ledger", "BDI Préstamos"])
+async def proxy_request_loan(
+    request: Request, 
+    user_id: int = Depends(get_current_user_id)
+):
+    """Proxy para que un usuario solicite un préstamo."""
+    logger.info(f"Proxying request to /request-loan for user_id: {user_id}")
+
+    # Esta llamada SÍ necesita el X-User-ID (que 'forward_request' añade)
+    return await forward_request(
+        request, 
+        f"{BALANCE_URL}/request-loan", # Llama al nuevo endpoint
+        inject_user_id=False,
+        pass_headers=["Authorization", "Idempotency-Key"] # Pasamos la Idempotency-Key
+    )
 
 @app.post("/ledger/transfer", tags=["Ledger"])
 async def proxy_transfer(request: Request, user_id: int = Depends(get_current_user_id)):

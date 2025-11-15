@@ -47,3 +47,6 @@ class GroupBalanceUpdate(BaseModel):
     """Schema para acreditar/debitar una cuenta de grupo."""
     group_id: int
     amount: float = Field(..., gt=0, description="El monto debe ser positivo.")
+
+class DepositRequest(BaseModel):
+    amount: float = Field(..., gt=0)
