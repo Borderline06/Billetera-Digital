@@ -78,3 +78,11 @@ class GroupWithdrawalRequest(BaseModel):
     member_user_id: int # El ID del miembro que RECIBIRÁ el dinero
     amount: float
     request_id: int # El ID de la 'withdrawal_request' (de la BD de MariaDB)
+
+
+
+class LoanEventRequest(BaseModel):
+    """Schema para procesar desembolsos o pagos de préstamos iniciados por Balance Service."""
+    user_id: int
+    amount: float = Field(..., gt=0)
+    loan_id: int # Para referenciar el préstamo en los metadatos

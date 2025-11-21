@@ -44,8 +44,12 @@ app = FastAPI(
 
 # --- Configuración de CORS ---
 origins = [
-    "http://localhost",
-    "http://localhost:3001",
+    "http://localhost",      # Para pruebas simples
+    "http://localhost:3000", # Grafana (o Frontend si Grafana está apagado)
+    "http://localhost:3001", # 👈 TU NUEVO PUERTO DE FRONTEND (OFICIAL)
+    "http://localhost:3002", # Por si acaso
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
 ]
 
 app.add_middleware(
@@ -55,8 +59,6 @@ app.add_middleware(
     allow_methods=["*"],    
     allow_headers=["*"],    
 )
-
-
 
 # --- Rutas Públicas (no requieren token) ---
 PUBLIC_ROUTES = [

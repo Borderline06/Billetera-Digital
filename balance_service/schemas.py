@@ -24,6 +24,7 @@ class BalanceCheck(BaseModel):
 class DepositRequest(BaseModel):
     """Schema para el modal de Préstamo (reusado)."""
     amount: float = Field(..., gt=0) # gt=0 significa "greater than 0"
+    dni: Optional[str] = None
 
 # --- ¡CLASE QUE FALTABA! ---
 class LoanResponse(BaseModel):
