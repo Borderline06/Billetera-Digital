@@ -13,6 +13,10 @@ from dotenv import load_dotenv
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from typing import Optional 
 
+
+from fastapi.security import APIKeyHeader
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
 # Carga variables de entorno
 load_dotenv()
 
@@ -66,23 +70,16 @@ PUBLIC_ROUTES = [
     "/metrics",
     "/docs",
     "/openapi.json",
-    "/api/v1/inbound-transfer"
+    "/api/v1/transfer-in"
 ]
 
 
 
-# ... (cerca de PUBLIC_ROUTES) ...
-API_KEY_NAME = "X-API-Key"
-api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False) # auto_error=False para manejo manual
-PARTNER_API_KEY = os.getenv("PARTNER_API_KEY")
 
-async def get_api_key(api_key: str = Depends(api_key_header)):
-    if not PARTNER_API_KEY:
-         logger.error("PARTNER_API_KEY no está configurada en el Gateway .env")
-         raise HTTPException(status_code=500, detail="Error de configuración interna del servidor.")
-    if api_key != PARTNER_API_KEY:
-        logger.warning(f"Intento de llamada a API de Partner con llave incorrecta: {api_key}")
-        raise HTTPException(status_code=403, detail="API Key inválida o faltante")
+
+async def verify_partner_key(api_key: str = Depends(api_key_header)):
+    if api_key != os.getenv("PARTNER_API_KEY"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "API Key inválida")
     return api_key
 
 
@@ -675,24 +672,18 @@ async def proxy_leader_withdrawal(
     )
 
 
-@app.post("/api/v1/inbound-transfer", tags=["Partner API"])
-async def partner_inbound_transfer(
+@app.post("/api/v1/transfer-in", tags=["Partner API"])
+async def partner_deposit(
     request: Request,
-    api_key: str = Depends(get_api_key) # ¡Seguridad!
+    api_key: str = Depends(verify_partner_key) # Solo entra con la clave correcta
 ):
-    """
-    Punto de entrada público para que partners (ej. Otro Grupo) 
-    depositen dinero a un usuario de Pixel Money via número de celular.
-    """
-    logger.info(f"Recibida llamada de Partner API a /api/v1/inbound-transfer")
-
+    """Endpoint público para que Java Bank nos envíe dinero."""
     return await forward_request(
-        request, 
-        f"{LEDGER_URL}/transfers/inbound",
-        inject_user_id=False,
-        pass_headers=[] # No pasamos ningún header del partner
+        request,
+        f"{LEDGER_URL}/external/transfer-in",
+        inject_user_id=False, # No hay usuario logueado
+        pass_headers=[]
     )
-
 
 
 

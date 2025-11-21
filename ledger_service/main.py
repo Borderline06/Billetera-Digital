@@ -941,6 +941,75 @@ async def execute_group_withdrawal(
 
 
 
+# 1. API EXTERNA (Inbound Transfer)
+@app.post("/transfers/inbound", response_model=schemas.Transaction, status_code=status.HTTP_201_CREATED, tags=["Internal API"])
+async def receive_inbound_transfer(
+    req: schemas.InboundTransferRequest,
+    db: Session = Depends(get_db)
+):
+    """Recibe una transferencia desde un servicio externo (ej. otro banco)."""
+    logger.info(f"Recibiendo transferencia entrante para celular: {req.destination_phone_number}")
+    
+    tx_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    currency = "PEN"
+    recipient_id = None
+
+    if not AUTH_SERVICE_URL or not BALANCE_SERVICE_URL:
+            logger.error("AUTH_SERVICE_URL o BALANCE_SERVICE_URL no están configurados")
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error de configuración interna.")
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            # 1. Buscar destinatario
+            auth_res = await client.get(f"{AUTH_SERVICE_URL}/users/by-phone/{req.destination_phone_number}")
+            if auth_res.status_code == 404:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "El número de celular no está registrado en Pixel Money.")
+            auth_res.raise_for_status()
+            recipient_id = int(auth_res.json()["id"])
+
+            # 2. Acreditar
+            credit_res = await client.post(
+                f"{BALANCE_SERVICE_URL}/balance/credit", 
+                json={"user_id": recipient_id, "amount": req.amount}
+            )
+            credit_res.raise_for_status()
+
+        except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code
+            detail = e.response.json().get("detail", "Error interno.")
+            raise HTTPException(status_code=status_code, detail=detail)
+        except httpx.RequestError as e:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Error de comunicación interna.")
+
+    # 3. Cassandra
+    try:
+        status_final = "COMPLETED"
+        decimal_amt = Decimal(str(req.amount))
+        metadata = {"external_tx_id": req.external_transaction_id, "sender_bank": "Banco Externo"}
+        
+        batch = BatchStatement()
+        q_id = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions (id, user_id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, created_at, updated_at, metadata) VALUES (%s, %s, 'EXTERNAL_BANK', %s, 'BDI', %s, 'DEPOSIT', %s, %s, %s, %s, %s, %s)")
+        q_user = SimpleStatement(f"INSERT INTO {KEYSPACE}.transactions_by_user (user_id, created_at, id, source_wallet_type, source_wallet_id, destination_wallet_type, destination_wallet_id, type, amount, currency, status, updated_at, metadata) VALUES (%s, %s, %s, 'EXTERNAL_BANK', %s, 'BDI', %s, 'DEPOSIT', %s, %s, %s, %s, %s)")
+        
+        # Usamos "JavaBank" como origen genérico
+        batch.add(q_id, (tx_id, recipient_id, "JavaBank", str(recipient_id), decimal_amt, currency, status_final, now, now, json.dumps(metadata)))
+        batch.add(q_user, (recipient_id, now, tx_id, "JavaBank", str(recipient_id), decimal_amt, currency, status_final, now, json.dumps(metadata)))
+        
+        db.execute(batch)
+        DEPOSIT_COUNT.inc() # <-- ¡AQUÍ ESTÁ LA VARIABLE CORREGIDA!
+
+        tx_data = await get_transaction_by_id(db, tx_id)
+        if not tx_data: raise Exception("No se pudo recuperar tx")
+        return schemas.Transaction(**tx_data)
+        
+    except Exception as e:
+        logger.critical(f"¡FALLO CRÍTICO POST-SAGA! Tx {tx_id} completada pero falló Cassandra: {e}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Transferencia completada con error de registro.")
+
+
+
+
 # --- Endpoint de Salud y Métricas ---
 
 @app.get("/health", tags=["Monitoring"])

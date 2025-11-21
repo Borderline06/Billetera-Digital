@@ -78,3 +78,9 @@ class GroupWithdrawalRequest(BaseModel):
     member_user_id: int # El ID del miembro que RECIBIRÁ el dinero
     amount: float
     request_id: int # El ID de la 'withdrawal_request' (de la BD de MariaDB)
+
+
+class ExternalTransferIn(BaseModel):
+    phone_number: str
+    amount: float
+    origin_bank: str
