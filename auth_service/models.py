@@ -1,6 +1,6 @@
 """Define el modelo de la tabla 'users' usando SQLAlchemy ORM."""
 
-from sqlalchemy import Column, Integer, String, Boolean, DateTime
+from sqlalchemy import Column, Integer, String, Boolean
 
 from db import Base
 
@@ -10,14 +10,5 @@ class User(Base):
     name = Column(String(100), nullable=False)  # 👈 nuevo campo
     email = Column(String(255), unique=True, index=True, nullable=False)
     phone_number = Column(String(20), unique=True, index=True, nullable=True)
-    # --- NUEVOS CAMPOS ---
-    # Requerido para enviar notificaciones de Telegram
-    telegram_chat_id = Column(String(100), unique=True, index=True, nullable=False)
-
     hashed_password = Column(String(255), nullable=False)
     is_active = Column(Boolean, default=True)
-
-    # --- NUEVOS CAMPOS PARA VERIFICACIÓN DE TELÉFONO ---
-    is_phone_verified = Column(Boolean, default=False, nullable=False)
-    phone_verification_code = Column(String(6), nullable=True)
-    phone_verification_expires = Column(DateTime, nullable=True)
