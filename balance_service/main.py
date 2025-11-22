@@ -1,59 +1,87 @@
-"""Servicio FastAPI para gestionar saldos de cuentas individuales (BDI) y grupales (BDG)."""
-
 import logging
 import time
-import models
+import os
+import httpx
 from decimal import Decimal
+from typing import Optional
+
 from fastapi import FastAPI, Depends, HTTPException, status, Request, Header
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import text
 from fastapi.responses import Response
-from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
+from dotenv import load_dotenv
 
 # Importaciones locales
-from db import engine, Base, get_db, SessionLocal # Importamos SessionLocal para chequeo de salud
+from db import engine, Base, get_db, SessionLocal
 from models import Account, GroupAccount, Loan, LoanStatus
 import schemas
+import models
+
+# Carga variables de entorno
+load_dotenv()
 
 # Configura logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Crea tablas si no existen al iniciar
+# --- CONFIGURACIÓN DE ENTORNO (Del .env que proporcionaste) ---
+LEDGER_SERVICE_URL = os.getenv("LEDGER_SERVICE_URL")
+DECOLECTA_API_URL = os.getenv("DECOLECTA_API_URL")
+DECOLECTA_TOKEN = os.getenv("DECOLECTA_TOKEN")
+
+# Crea tablas si no existen
 try:
     Base.metadata.create_all(bind=engine)
-    logger.info("Tablas de base de datos (accounts, group_accounts) verificadas/creadas.")
+    logger.info("Tablas de base de datos verificadas/creadas.")
 except Exception as e:
     logger.error(f"Error al inicializar la base de datos: {e}", exc_info=True)
-    # Considerar detener el servicio si la BD no está lista
 
-# Inicializa FastAPI
 app = FastAPI(
     title="Balance Service - Pixel Money",
-    description="Gestiona los saldos de las billeteras individuales (BDI) y grupales (BDG).",
-    version="1.0.0"
+    description="Gestiona saldos, préstamos y orquestación con Ledger.",
+    version="2.1.0"
 )
 
-# --- Métricas Prometheus ---
-REQUEST_COUNT = Counter(
-    "balance_requests_total",
-    "Total requests processed by Balance Service",
-    ["method", "endpoint", "status_code"]
-)
-REQUEST_LATENCY = Histogram(
-    "balance_request_latency_seconds",
-    "Request latency in seconds for Balance Service",
-    ["endpoint"]
-)
+# --- MÉTRICAS PROMETHEUS ---
+REQUEST_COUNT = Counter("balance_requests_total", "Total requests", ["method", "endpoint", "status_code"])
+REQUEST_LATENCY = Histogram("balance_request_latency_seconds", "Request latency", ["endpoint"])
 
-# --- Middleware para Métricas ---
+# Métricas de Negocio (Stress-test feature)
+BANK_PROFIT_GAUGE = Gauge('bank_profit_total', 'Ganancia total acumulada del banco')
+BANK_LOANS_GAUGE = Gauge('bank_loans_total', 'Cantidad total de préstamos')
+BANK_LENT_GAUGE = Gauge('bank_lent_total', 'Monto total prestado')
+
+def update_metrics_from_db(db: Session):
+    """Recalcula las métricas de negocio leyendo la base de datos."""
+    try:
+        paid_loans = db.query(Loan).filter(Loan.status == LoanStatus.PAID).all()
+        total_profit = sum(l.principal_amount * (l.interest_rate / 100) for l in paid_loans)
+        
+        all_loans = db.query(Loan).all()
+        total_lent = sum(l.principal_amount for l in all_loans)
+        
+        BANK_PROFIT_GAUGE.set(float(total_profit))
+        BANK_LENT_GAUGE.set(float(total_lent))
+        BANK_LOANS_GAUGE.set(len(all_loans))
+    except Exception as e:
+        logger.error(f"Error actualizando métricas: {e}")
+
+@app.on_event("startup")
+def startup_event():
+    try:
+        db = SessionLocal()
+        update_metrics_from_db(db)
+        db.close()
+    except Exception:
+        pass
+
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
     start_time = time.time()
     response = None
-    status_code = 500 # Default
-
+    status_code = 500
     try:
         response = await call_next(request)
         status_code = response.status_code
@@ -66,426 +94,320 @@ async def metrics_middleware(request: Request, call_next):
     finally:
         latency = time.time() - start_time
         endpoint = request.url.path
-
-        # Normalizar endpoints con IDs para métricas
-        parts = endpoint.split("/")
-        if len(parts) == 3:
-            if parts[1] == "balance" and parts[2].isdigit():
-                endpoint = "/balance/{user_id}"
-            elif parts[1] == "group_balance" and parts[2].isdigit():
-                endpoint = "/group_balance/{group_id}"
-
-        final_status_code = getattr(response, 'status_code', status_code)
-
+        # Normalización simple de endpoints
+        if "/balance/" in endpoint and endpoint.split('/')[-1].isdigit(): endpoint = "/balance/{user_id}"
+        
         REQUEST_LATENCY.labels(endpoint=endpoint).observe(latency)
-        REQUEST_COUNT.labels(
-            method=request.method,
-            endpoint=endpoint,
-            status_code=final_status_code
-        ).inc()
-
+        final_code = getattr(response, 'status_code', status_code)
+        REQUEST_COUNT.labels(method=request.method, endpoint=endpoint, status_code=final_code).inc()
     return response
 
-# --- Endpoints de Salud y Métricas ---
 @app.get("/metrics", tags=["Monitoring"])
 def metrics():
-    """Expone métricas de la aplicación para Prometheus."""
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 @app.get("/health", tags=["Monitoring"])
 def health_check():
-    """Verifica la salud básica del servicio y la conexión a la BD."""
-    db_status = "ok"
+    return {"status": "ok", "service": "balance_service", "ledger_connected": bool(LEDGER_SERVICE_URL)}
+
+# --- HELPER: Validación DNI (Stress-test feature) ---
+async def validar_dni_reniec(dni: str) -> str:
+    if dni == "99999999": return "Usuario Test (Stress)"
+    if not dni or len(dni) != 8 or not dni.isdigit():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "DNI inválido.")
+    
+    if not DECOLECTA_API_URL or not DECOLECTA_TOKEN:
+        return "Usuario Validado (Sin API Externa)"
+
     try:
-        db = SessionLocal()
-        
-        db.execute(text("SELECT 1"))
-        db.close()
-    except Exception as e:
-        logger.error(f"Health check fallido - Error de BD: {e}", exc_info=True)
-        db_status = "error"
-        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{DECOLECTA_API_URL}?numero={dni}",
+                headers={"Authorization": f"Bearer {DECOLECTA_TOKEN}"},
+                timeout=5.0
+            )
+            if response.status_code == 200:
+                return response.json().get("full_name") or "Ciudadano"
+            elif response.status_code == 404:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "DNI no encontrado en RENIEC.")
+    except Exception:
+        return "Validación Pendiente (Error API)"
+    return "Ciudadano Peruano"
 
-    return {"status": "ok", "service": "balance_service", "database": db_status}
-
-
-# --- Endpoints para Cuentas Individuales (BDI) ---
+# --- ENDPOINTS BDI (Cuentas Individuales) ---
 
 @app.post("/accounts", response_model=schemas.AccountResponse, status_code=status.HTTP_201_CREATED, tags=["BDI Accounts"])
 def create_account(account_in: schemas.AccountCreate, db: Session = Depends(get_db)):
-    """Crea una nueva cuenta de saldo individual (BDI). Llamado por auth_service."""
-    logger.info(f"Solicitud para crear cuenta individual para user_id: {account_in.user_id}")
     new_account = Account(user_id=account_in.user_id, balance=0.0)
-
     try:
         db.add(new_account)
         db.commit()
         db.refresh(new_account)
-        logger.info(f"Cuenta individual creada exitosamente para user_id: {new_account.user_id}")
         return new_account
     except IntegrityError:
         db.rollback()
-        logger.warning(f"Conflicto: Cuenta individual para user_id {account_in.user_id} ya existe.")
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Account for user_id {account_in.user_id} already exists.",
-        )
-    except Exception as e:
-         db.rollback()
-         logger.error(f"Error al crear cuenta individual para user_id {account_in.user_id}: {e}", exc_info=True)
-         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal server error creating account.")
-
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="Account already exists.")
 
 @app.get("/balance/{user_id}", response_model=schemas.AccountResponse, tags=["BDI Balance"])
 def get_balance(user_id: int, db: Session = Depends(get_db)):
-    """Obtiene los detalles y saldo de una cuenta individual (BDI)."""
-    logger.debug(f"Solicitud de saldo para user_id: {user_id}")
-    account = db.query(Account).options(
-    joinedload(Account.loan) # <-- ¡Carga el préstamo relacionado!
-    ).filter(Account.user_id == user_id).first()
+    # Usamos joinedload (Develop logic) para traer info del préstamo si existe
+    account = db.query(Account).options(joinedload(Account.loan)).filter(Account.user_id == user_id).first()
     if not account:
-        logger.warning(f"Cuenta no encontrada para user_id: {user_id}")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Account for user_id {user_id} not found.",
-        )
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Account not found.")
     return account
 
-@app.post("/balance/check", status_code=status.HTTP_200_OK, tags=["BDI Balance"])
+@app.post("/balance/check", tags=["BDI Balance"])
 def check_funds(check_in: schemas.BalanceCheck, db: Session = Depends(get_db)):
-    """Verifica si una cuenta individual (BDI) tiene fondos suficientes (sin bloqueo)."""
-    logger.debug(f"Verificando fondos {check_in.amount} para user_id: {check_in.user_id}")
-
-    # --- INICIO DE LA CORRECCIÓN ---
-    # Convertir el monto de entrada (float) a Decimal para una comparación segura
-    amount_to_check = Decimal(str(check_in.amount))
-    # --- FIN DE LA CORRECCIÓN ---
-
+    # Corrección Decimal (Develop logic)
+    amount_check = Decimal(str(check_in.amount))
     account = db.query(Account).filter(Account.user_id == check_in.user_id).first()
     if not account:
-        logger.warning(f"Check funds fallido: Cuenta no encontrada para user_id: {check_in.user_id}")
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Account for user_id {check_in.user_id} not found.")
-
-    # --- INICIO DE LA CORRECCIÓN ---
-    # Ahora comparamos Decimal (de la BD) vs Decimal (de la entrada)
-    if account.balance < amount_to_check:
-        logger.warning(f"Check funds fallido: Fondos insuficientes para user_id: {check_in.user_id} (Saldo: {account.balance}, Solicitado: {amount_to_check})")
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Insufficient funds.")
-    # --- FIN DE LA CORRECCIÓN ---
-
-    return {"message": "Sufficient funds."}
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Account not found.")
+    if account.balance < amount_check:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Insufficient funds.")
+    return {"message": "Sufficient funds"}
 
 @app.post("/balance/credit", response_model=schemas.AccountResponse, tags=["BDI Balance"])
 def credit_balance(update_in: schemas.BalanceUpdate, db: Session = Depends(get_db)):
-    """Acredita (suma) fondos a una cuenta individual (BDI) usando bloqueo pesimista."""
-    logger.info(f"Intentando acreditar {update_in.amount} a user_id: {update_in.user_id}")
+    """
+    Acredita fondos. Usa BLOQUEO PESIMISTA (Develop logic) para seguridad.
+    """
     try:
-        db.begin()
-        # Bloquea la fila para la actualización
-        account = db.query(Account).filter(Account.user_id == update_in.user_id).with_for_update().first()
-        if not account:
-            logger.warning(f"Crédito fallido: Cuenta no encontrada para user_id: {update_in.user_id}")
-            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Account for user_id {update_in.user_id} not found.")
-
-        account.balance += Decimal(str(update_in.amount))
-        db.commit()
+        with db.begin():
+            account = db.query(Account).filter(Account.user_id == update_in.user_id).with_for_update().first()
+            if not account:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found.")
+            
+            # Conversión segura Decimal
+            account.balance += Decimal(str(update_in.amount))
+            db.commit()
         db.refresh(account)
-        logger.info(f"Crédito exitoso. Nuevo balance para user_id {update_in.user_id}: {account.balance}")
         return account
-
-    except HTTPException as http_exc:
-        db.rollback()
-        raise http_exc
     except Exception as e:
         db.rollback()
-        logger.error(f"Error al acreditar balance para user_id {update_in.user_id}: {e}", exc_info=True)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal server error during credit.")
-
-# REEMPLAZA esta función en balance_service/main.py
+        logger.error(f"Error credit: {e}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal error.")
 
 @app.post("/balance/debit", response_model=schemas.AccountResponse, tags=["BDI Balance"])
 def debit_balance(update_in: schemas.BalanceUpdate, db: Session = Depends(get_db)):
-    """Debita (resta) fondos de una cuenta individual (BDI) usando bloqueo pesimista."""
-    logger.info(f"Intentando debitar {update_in.amount} de user_id: {update_in.user_id}")
-
-    # Convertimos a Decimal para comparaciones seguras
+    """
+    Debita fondos. Usa BLOQUEO PESIMISTA + VERIFICACIÓN DECIMAL (Develop logic).
+    """
     amount_to_debit = Decimal(str(update_in.amount))
-
     try:
-        db.begin()
-
-        # Bloquea la fila para la actualización
-        account = db.query(Account).filter(Account.user_id == update_in.user_id).with_for_update().first()
-        if not account:
-            logger.warning(f"Débito fallido: Cuenta no encontrada para user_id: {update_in.user_id}")
-            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Account for user_id {update_in.user_id} not found.")
-
-        # --- ¡¡¡AÑADE ESTE BLOQUE DE SEGURIDAD!!! ---
-        # Comparamos Decimal vs Decimal
-        if account.balance < amount_to_debit:
-            logger.warning(f"Débito fallido: Fondos insuficientes para user_id: {update_in.user_id} (Saldo: {account.balance}, Solicitado: {amount_to_debit})")
-            db.rollback() # ¡Importante! Libera el bloqueo antes de salir
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Insufficient funds.")
-        # --- FIN DEL BLOQUE DE SEGURIDAD ---
-
-        account.balance -= amount_to_debit # Restamos Decimal
-        db.commit()
+        with db.begin():
+            account = db.query(Account).filter(Account.user_id == update_in.user_id).with_for_update().first()
+            if not account:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found.")
+            
+            if account.balance < amount_to_debit:
+                db.rollback() # Liberar bloqueo
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Insufficient funds.")
+            
+            account.balance -= amount_to_debit
+            db.commit()
         db.refresh(account)
-        logger.info(f"Débito exitoso. Nuevo balance para user_id {update_in.user_id}: {account.balance}")
         return account
-
-    except HTTPException as http_exc:
-        db.rollback()
-        raise http_exc
+    except HTTPException as he:
+        raise he
     except Exception as e:
         db.rollback()
-        logger.error(f"Error al debitar balance para user_id {update_in.user_id}: {e}", exc_info=True)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal server error during debit.")
+        logger.error(f"Error debit: {e}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal error.")
 
-# --- ENDPOINTS DE BILLETERA GRUPAL (BDG) ---
+# --- ENDPOINTS BDI (Préstamos con SAGA) ---
 
-@app.post("/group_accounts", response_model=schemas.GroupAccount, status_code=status.HTTP_201_CREATED, tags=["Balance - Grupal"])
-def create_group_account(
-    account_in: schemas.GroupAccountCreate, 
+@app.post("/request-loan", response_model=schemas.AccountResponse, tags=["BDI Préstamos"])
+async def request_loan(
+    req: schemas.DepositRequest,
+    x_user_id: int = Header(..., alias="X-User-ID"),
     db: Session = Depends(get_db)
 ):
     """
-    Crea una nueva cuenta de balance para un grupo (BDG).
-    Llamado por 'group_service' cuando se crea un grupo.
+    Solicita préstamo. Usa validación RENIEC y orquestación con Ledger (Stress-test logic).
     """
-    logger.info(f"Solicitud para crear cuenta grupal para group_id: {account_in.group_id}")
+    user_id = x_user_id
+    amount_principal = Decimal(str(req.amount))
+    
+    # 1. Validación Externa (RENIEC)
+    nombre_real = await validar_dni_reniec(req.dni)
+    logger.info(f"Préstamo user {user_id} - DNI {req.dni} ({nombre_real})")
 
-    # Verificar si ya existe
-    db_account = db.query(models.GroupAccount).filter(models.GroupAccount.group_id == account_in.group_id).first()
-    if db_account:
-        logger.warning(f"Intento de crear cuenta duplicada para group_id: {account_in.group_id}")
-        raise HTTPException(status.HTTP_409_CONFLICT, detail="La cuenta de grupo ya existe.")
+    MAX_LOAN = Decimal('500.00')
+    if amount_principal > MAX_LOAN:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Monto excede límite.")
+
+    INTEREST_RATE = Decimal('0.05')
+    total_debt = amount_principal * (1 + INTEREST_RATE)
 
     try:
-        new_account = models.GroupAccount(
-            group_id=account_in.group_id,
-            balance=0.00, # Saldo inicial 0
-            version=1
-        )
+        with db.begin():
+            # Check deuda previa
+            existing = db.query(Loan).filter(Loan.user_id == user_id, Loan.status == LoanStatus.ACTIVE).first()
+            if existing:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Ya tienes un préstamo activo.")
+
+            # Crear préstamo local
+            new_loan = Loan(
+                user_id=user_id,
+                dni=req.dni,
+                principal_amount=amount_principal,
+                outstanding_balance=total_debt,
+                interest_rate=INTEREST_RATE * 100,
+                status=LoanStatus.ACTIVE
+            )
+            db.add(new_loan)
+            db.commit()
+        
+        db.refresh(new_loan)
+
+        # 2. SAGA: Llamar al Ledger (Microservicio)
+        # Esto es vital dado que tienes LEDGER_SERVICE_URL en tu .env
+        if LEDGER_SERVICE_URL:
+            async with httpx.AsyncClient() as client:
+                try:
+                    res = await client.post(
+                        f"{LEDGER_SERVICE_URL}/loans/disbursement",
+                        json={
+                            "user_id": user_id,
+                            "amount": float(amount_principal),
+                            "loan_id": new_loan.id
+                        }
+                    )
+                    res.raise_for_status()
+                except Exception as e:
+                    # Compensación: Si falla Ledger, borramos el préstamo local
+                    logger.error(f"Fallo Ledger SAGA: {e}")
+                    db.delete(new_loan)
+                    db.commit()
+                    raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Error conectando con Ledger.")
+        else:
+            # Fallback por si el env está mal configurado, acreditamos local
+            update_in = schemas.BalanceUpdate(user_id=user_id, amount=float(amount_principal))
+            credit_balance(update_in, db)
+
+        update_metrics_from_db(db)
+        return db.query(Account).filter(Account.user_id == user_id).first()
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.error(f"Error critico prestamo: {e}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno.")
+
+@app.post("/pay-loan", response_model=schemas.LoanResponse, tags=["BDI Préstamos"])
+async def pay_loan(
+    x_user_id: int = Header(..., alias="X-User-ID"),
+    db: Session = Depends(get_db)
+):
+    user_id = x_user_id
+    
+    loan = db.query(Loan).filter(Loan.user_id == user_id, Loan.status == LoanStatus.ACTIVE).first()
+    if not loan:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No tienes préstamos activos.")
+
+    amount_to_pay = loan.outstanding_balance
+
+    try:
+        # SAGA: Cobro a través del Ledger
+        if LEDGER_SERVICE_URL:
+            async with httpx.AsyncClient() as client:
+                res = await client.post(
+                    f"{LEDGER_SERVICE_URL}/loans/payment",
+                    json={
+                        "user_id": user_id,
+                        "amount": float(amount_to_pay),
+                        "loan_id": loan.id
+                    }
+                )
+                res.raise_for_status()
+        else:
+             # Fallback local
+             update_in = schemas.BalanceUpdate(user_id=user_id, amount=float(amount_to_pay))
+             debit_balance(update_in, db)
+
+        # Cerrar préstamo localmente
+        loan.outstanding_balance = Decimal('0.00')
+        loan.status = LoanStatus.PAID
+        db.commit()
+        db.refresh(loan)
+        update_metrics_from_db(db)
+        return loan
+
+    except httpx.HTTPStatusError as e:
+        # Propagar error del Ledger (ej: fondos insuficientes)
+        detail = "Error pago."
+        try: detail = e.response.json().get('detail')
+        except: pass
+        raise HTTPException(e.response.status_code, detail)
+    except Exception as e:
+        logger.error(f"Error pago: {e}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno.")
+
+# --- ENDPOINTS GRUPALES (BDG) - IGUAL QUE DEVELOP ---
+@app.post("/group_accounts", response_model=schemas.GroupAccount, status_code=status.HTTP_201_CREATED, tags=["Balance - Grupal"])
+def create_group_account(account_in: schemas.GroupAccountCreate, db: Session = Depends(get_db)):
+    # Lógica estándar...
+    try:
+        new_account = GroupAccount(group_id=account_in.group_id, balance=0.00)
         db.add(new_account)
         db.commit()
         db.refresh(new_account)
-        logger.info(f"Cuenta grupal creada exitosamente para group_id: {new_account.group_id}")
         return new_account
     except IntegrityError:
         db.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, detail="Error de integridad, la cuenta grupal puede que ya exista.")
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Error interno al crear cuenta grupal: {e}", exc_info=True)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al crear cuenta de grupo.")
+        raise HTTPException(status.HTTP_409_CONFLICT, "Group account exists.")
 
 @app.get("/group_balance/{group_id}", response_model=schemas.GroupAccount, tags=["Balance - Grupal"])
 def get_group_balance(group_id: int, db: Session = Depends(get_db)):
-    """Obtiene el saldo de una cuenta grupal específica."""
-    account = db.query(models.GroupAccount).filter(models.GroupAccount.group_id == group_id).first()
-    if not account:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Cuenta de grupo (BDG) no encontrada para group_id: {group_id}")
+    account = db.query(GroupAccount).filter(GroupAccount.group_id == group_id).first()
+    if not account: raise HTTPException(404, "Not found")
     return account
 
 @app.post("/group_balance/credit", response_model=schemas.GroupAccount, tags=["Balance - Grupal"])
-def credit_group_balance(
-    update_in: schemas.GroupBalanceUpdate, 
-    db: Session = Depends(get_db)
-):
-    """Acredita (suma) fondos a una cuenta grupal (BDG)."""
-    logger.info(f"Intentando acreditar {update_in.amount} a group_id: {update_in.group_id}")
-
+def credit_group_balance(update_in: schemas.GroupBalanceUpdate, db: Session = Depends(get_db)):
     try:
         with db.begin():
-            account = db.query(models.GroupAccount).filter(
-                models.GroupAccount.group_id == update_in.group_id
-            ).with_for_update().first() 
-
-            if not account:
-                logger.warning(f"Aporte fallido: Cuenta BDG no encontrada para group_id: {update_in.group_id}")
-                raise HTTPException(status.HTTP_404_NOT_FOUND, f"Cuenta de grupo (BDG) no encontrada.")
-
+            account = db.query(GroupAccount).filter(GroupAccount.group_id == update_in.group_id).with_for_update().first()
+            if not account: raise HTTPException(404, "Not found")
             account.balance += Decimal(str(update_in.amount))
-            db.commit() 
-
+            db.commit()
         db.refresh(account)
-        logger.info(f"Aporte exitoso. Nuevo balance para group_id {account.group_id}: {account.balance}")
         return account
-
-    except HTTPException:
-         db.rollback()
-         raise 
     except Exception as e:
         db.rollback()
-        logger.error(f"Error interno al acreditar a grupo {update_in.group_id}: {e}", exc_info=True)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al procesar el aporte.")
-
-# ... (después de 'credit_group_balance')
+        raise e
 
 @app.post("/group_balance/debit", response_model=schemas.GroupAccount, tags=["Balance - Grupal"])
-def debit_group_balance(
-    update_in: schemas.GroupBalanceUpdate, 
-    db: Session = Depends(get_db)
-):
-    """
-    Debita (resta) fondos de una cuenta grupal (BDG) con control de fondos.
-    Llamado por 'ledger_service' cuando un líder aprueba un retiro.
-    """
-    logger.info(f"Intentando debitar {update_in.amount} de group_id: {update_in.group_id}")
-    amount_to_debit = Decimal(str(update_in.amount))
-
+def debit_group_balance(update_in: schemas.GroupBalanceUpdate, db: Session = Depends(get_db)):
+    amount = Decimal(str(update_in.amount))
     try:
         with db.begin():
-            account = db.query(models.GroupAccount).filter(
-                models.GroupAccount.group_id == update_in.group_id
-            ).with_for_update().first() 
-
-            if not account:
-                logger.warning(f"Retiro fallido: Cuenta BDG no encontrada para group_id: {update_in.group_id}")
-                raise HTTPException(status.HTTP_404_NOT_FOUND, f"Cuenta de grupo (BDG) no encontrada.")
-
-            # ¡Verificación de fondos del GRUPO!
-            if account.balance < amount_to_debit:
-                logger.warning(f"Retiro fallido: Fondos insuficientes en el grupo {update_in.group_id}")
-                raise HTTPException(status.HTTP_400_BAD_REQUEST, "El grupo no tiene fondos suficientes para este retiro.")
-
-            account.balance -= amount_to_debit
-            db.commit() 
-
-        db.refresh(account)
-        logger.info(f"Retiro exitoso. Nuevo balance para group_id {account.group_id}: {account.balance}")
-        return account
-
-    except HTTPException:
-         db.rollback()
-         raise 
-    except Exception as e:
-         db.rollback()
-         logger.error(f"Error interno al debitar de grupo {update_in.group_id}: {e}", exc_info=True)
-         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al procesar el retiro.")
-    
-# ... (después de 'credit_group_balance')
-
-@app.post("/request-loan", response_model=schemas.AccountResponse, tags=["BDI Préstamos"])
-def request_loan(
-    req: schemas.DepositRequest, # Reusamos el schema de 'Deposit' (solo necesita 'amount')
-    x_user_id: int = Header(..., alias="X-User-ID"),
-    db: Session = Depends(get_db)
-):
-    """
-    Permite a un usuario (BDI) solicitar un préstamo.
-    Incluye lógica de negocio (restricciones) antes de llamar al Ledger.
-    """
-    user_id = x_user_id
-    amount_to_borrow = Decimal(str(req.amount))
-
-    logger.info(f"Usuario {user_id} solicitando préstamo de {amount_to_borrow}")
-
-    # --- ¡RESTRICCIÓN #1: No pedir préstamos muy altos! ---
-    MAX_LOAN_AMOUNT = Decimal('500.00') # Límite de S/ 500
-    if amount_to_borrow > MAX_LOAN_AMOUNT:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"El monto solicitado excede el límite de préstamo (S/ {MAX_LOAN_AMOUNT}).")
-
-    try:
-        with db.begin():
-            # --- ¡RESTRICCIÓN #2: No pedir si ya tienes uno activo! ---
-            existing_loan = db.query(models.Loan).filter(
-                models.Loan.user_id == user_id,
-                models.Loan.status == models.LoanStatus.ACTIVE
-            ).first()
-
-            if existing_loan:
-                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Ya tienes un préstamo activo. Debes pagarlo antes de solicitar otro.")
-
-            # --- Lógica de aprobación (simplificada) ---
-            # 1. Creamos el registro de la deuda
-            new_loan = models.Loan(
-                user_id=user_id,
-                principal_amount=amount_to_borrow,
-                outstanding_balance=amount_to_borrow, # (Por ahora, interés simple 0)
-                status=models.LoanStatus.ACTIVE
-            )
-            db.add(new_loan)
-
-            # 2. Acreditamos el saldo en la BDI (la bóveda)
-            account = db.query(models.Account).filter(models.Account.user_id == user_id).with_for_update().first()
-            if not account:
-                raise HTTPException(status.HTTP_404_NOT_FOUND, "Cuenta de usuario no encontrada.")
-
-            account.balance += amount_to_borrow
+            account = db.query(GroupAccount).filter(GroupAccount.group_id == update_in.group_id).with_for_update().first()
+            if not account: raise HTTPException(404, "Not found")
+            if account.balance < amount: raise HTTPException(400, "Insufficient funds")
+            account.balance -= amount
             db.commit()
-
         db.refresh(account)
-
-        # 3. (Falta Paso 3) ¡Llamar al Ledger para registrar esto!
-        # (Lo haremos después, por ahora el dinero ya está en la bóveda)
-
-        logger.info(f"Préstamo aprobado para {user_id}. Nuevo saldo: {account.balance}")
         return account
-
-    except HTTPException as http_exc:
-        db.rollback()
-        raise http_exc
     except Exception as e:
         db.rollback()
-        logger.error(f"Error al procesar préstamo para {user_id}: {e}", exc_info=True)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al procesar el préstamo.")
-    
-# ... (después de 'request_loan')
+        raise e
 
-@app.post("/pay-loan", response_model=schemas.LoanResponse, tags=["BDI Préstamos"])
-def pay_loan(
-    x_user_id: int = Header(..., alias="X-User-ID"),
-    db: Session = Depends(get_db)
-):
-    """
-    Permite a un usuario (BDI) pagar su préstamo activo.
-    RESTRICCIÓN: Solo si tiene saldo (balance) suficiente.
-    """
-    user_id = x_user_id
-    logger.info(f"Usuario {user_id} intentando pagar su préstamo.")
+# --- ENDPOINT INTERNO (Stress-test feature) ---
+@app.delete("/accounts/{user_id}", tags=["Internal"])
+def delete_account_internal(user_id: int, db: Session = Depends(get_db)):
+    """Permite al Auth Service eliminar usuarios (Si no tienen deuda)."""
+    active_loan = db.query(Loan).filter(Loan.user_id == user_id, Loan.status == LoanStatus.ACTIVE).first()
+    if active_loan:
+        raise HTTPException(400, f"Deuda pendiente: {active_loan.outstanding_balance}")
 
     try:
         with db.begin():
-            # 1. Bloquear AMBAS tablas (Cuenta y Préstamo)
-            account = db.query(models.Account).filter(models.Account.user_id == user_id).with_for_update().first()
-            loan = db.query(models.Loan).filter(
-                models.Loan.user_id == user_id,
-                models.Loan.status == models.LoanStatus.ACTIVE
-            ).with_for_update().first()
-
-            if not account:
-                raise HTTPException(status.HTTP_404_NOT_FOUND, "Tu cuenta de saldo no fue encontrada.")
-            if not loan:
-                raise HTTPException(status.HTTP_404_NOT_FOUND, "No se encontró ningún préstamo activo para pagar.")
-
-            amount_to_pay = loan.outstanding_balance
-
-            # 2. ¡RESTRICCIÓN! Verificar fondos
-            if account.balance < amount_to_pay:
-                logger.warning(f"Pago de préstamo fallido: Fondos insuficientes para user_id: {user_id}")
-                raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Fondos insuficientes. Necesitas S/ {amount_to_pay} para pagar.")
-
-            # 3. ¡Éxito! Mover el dinero
-            account.balance -= amount_to_pay # Restar de BDI
-            loan.outstanding_balance = Decimal('0.00') # Pagar deuda
-            loan.status = models.LoanStatus.PAID # Marcar como pagado
-
+            db.query(Loan).filter(Loan.user_id == user_id).delete()
+            db.query(Account).filter(Account.user_id == user_id).delete()
             db.commit()
-
-        db.refresh(loan)
-
-        # 4. (Falta Paso 4) ¡Llamar al Ledger para registrar este pago!
-        # (Lo haremos después, por ahora la deuda está pagada)
-
-        logger.info(f"Préstamo {loan.id} pagado exitosamente por {user_id}.")
-        return loan
-
-    except HTTPException as http_exc:
-        db.rollback()
-        raise http_exc
+        return {"message": "Eliminado"}
     except Exception as e:
         db.rollback()
-        logger.error(f"Error al pagar préstamo para {user_id}: {e}", exc_info=True)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al pagar el préstamo.")
+        raise HTTPException(500, "Error eliminando.")

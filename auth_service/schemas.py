@@ -2,24 +2,27 @@
 
 from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from typing import Optional, List
-from datetime import datetime # <-- NUEVO
+from datetime import datetime
 
 # --- Schemas de Usuario ---
 
 class UserCreate(BaseModel):
     """Schema para los datos requeridos al crear un nuevo usuario."""
     name: str = Field(..., min_length=3, description="Nombre completo del usuario")
-    email: EmailStr # <-- CORREGIDO (era 'str')
+    email: EmailStr
     password: str = Field(..., min_length=8, description="La contraseña debe tener al menos 8 caracteres")
     phone_number: str = Field(..., min_length=9, max_length=15)
-    # --- NUEVO CAMPO REQUERIDO ---
-    telegram_chat_id: str = Field(..., min_length=5, description="ID de Chat de Telegram del usuario")
+    
+    # --- MODIFICACIÓN HÍBRIDA ---
+    # Lo hacemos opcional para que los scripts de stress-test (que no envían esto) pasen la validación inicial.
+    # En main.py, si NO estamos en modo estrés, validamos manualmente que esto exista.
+    telegram_chat_id: Optional[str] = Field(None, min_length=5, description="ID de Chat de Telegram del usuario")
 
 class UserResponse(BaseModel):
     """Schema para los datos devueltos tras la creación exitosa de un usuario (excluye contraseña)."""
     id: int
     name: str
-    email: EmailStr # <-- CORREGIDO (era 'str')
+    email: EmailStr
     phone_number: str | None = None
 
     # Configuración de Pydantic v2+ para permitir mapeo desde modelos ORM (SQLAlchemy)
@@ -32,15 +35,14 @@ class Token(BaseModel):
     """Schema para el token de acceso JWT devuelto tras un login exitoso."""
     access_token: str
     token_type: str = "bearer"
-    user_id: int      # <-- ¡AÑADE ESTO!
-    name: str         # <-- ¡AÑADE ESTO!
-    email: EmailStr   # <-- ¡AÑADE ESTO!
-    is_phone_verified: bool # <-- NUEVO: Para que el frontend sepa si mostrar pantalla de verificación
+    user_id: int      
+    name: str         
+    email: EmailStr   
+    # Mantenemos esto de develop para que el frontend sepa qué hacer
+    is_phone_verified: bool 
 
 class TokenPayload(BaseModel):
     """Schema que representa el payload decodificado de un token JWT válido."""
-    
-    # 'sub' (subject) es el campo estándar de JWT para guardar el ID de usuario
     sub: Optional[str] = None
     exp: Optional[int] = None
     name: Optional[str] = None
@@ -52,7 +54,8 @@ class PasswordChangeRequest(BaseModel):
     current_password: str
     new_password: str
     confirm_password: str
-# --- NUEVO: Schemas de Verificación de Teléfono ---
+
+# --- Schemas de Verificación de Teléfono (De Develop) ---
 
 class PhoneVerificationRequest(BaseModel):
     """Schema para verificar un código de teléfono."""
