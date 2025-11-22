@@ -24,6 +24,7 @@ class BalanceCheck(BaseModel):
 class DepositRequest(BaseModel):
     """Schema para el modal de Préstamo (reusado)."""
     amount: float = Field(..., gt=0) # gt=0 significa "greater than 0"
+    dni: Optional[str] = None
 
 # --- ¡CLASE QUE FALTABA! ---
 class LoanResponse(BaseModel):
@@ -37,14 +38,13 @@ class LoanResponse(BaseModel):
 # --- FIN DE CLASE QUE FALTABA ---
 
 class AccountResponse(BaseModel):
-    """Respuesta principal para /balance/me."""
     user_id: int
     balance: Decimal
     version: int
-    active_loan: Optional[LoanResponse] = None # ¡Ahora 'LoanResponse' SÍ está definida!
+    
+    loan: Optional[LoanResponse] = None 
 
     model_config = ConfigDict(from_attributes=True)
-
 
 # --- Schemas de Cuenta Grupal (BDG) ---
 

@@ -44,8 +44,12 @@ app = FastAPI(
 
 # --- Configuración de CORS ---
 origins = [
-    "http://localhost",
-    "http://localhost:3001",
+    "http://localhost",      # Para pruebas simples
+    "http://localhost:3000", # Grafana (o Frontend si Grafana está apagado)
+    "http://localhost:3001", # 👈 TU NUEVO PUERTO DE FRONTEND (OFICIAL)
+    "http://localhost:3002", # Por si acaso
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
 ]
 
 app.add_middleware(
@@ -56,21 +60,16 @@ app.add_middleware(
     allow_headers=["*"],    
 )
 
-
-
 # --- Rutas Públicas (no requieren token) ---
 PUBLIC_ROUTES = [
     "/auth/login",
     "/auth/register",
-    # --- NUEVAS RUTAS PÚBLICAS ---
-    "/auth/verify-phone",
-    "/auth/resend-code",
-    # --- FIN DE NUEVAS RUTAS ---
     "/health",
     "/metrics",
     "/docs",
     "/openapi.json",
-    "/api/v1/inbound-transfer"
+    "/api/v1/inbound-transfer",
+    "/bank/stats"  
 ]
 
 
@@ -285,20 +284,6 @@ async def proxy_login(request: Request):
     """Reenvía la solicitud de login (form-data) al servicio de autenticación."""
     logger.info("Proxying request to /auth/login")
     return await forward_request(request, f"{AUTH_URL}/login")
-
-# --- NUEVOS ENDPOINTS PÚBLICOS DE VERIFICACIÓN ---
-
-@app.post("/auth/verify-phone", tags=["Authentication"])
-async def proxy_verify_phone(request: Request):
-    """Reenvía la solicitud de verificación de código al servicio de autenticación."""
-    logger.info("Proxying request to /auth/verify-phone")
-    return await forward_request(request, f"{AUTH_URL}/verify-phone")
-
-@app.post("/auth/resend-code", tags=["Authentication"])
-async def proxy_resend_code(request: Request):
-    """Reenvía la solicitud de reenvío de código al servicio de autenticación."""
-    logger.info("Proxying request to /auth/resend-code")
-    return await forward_request(request, f"{AUTH_URL}/resend-code")
 
 
 # --- Endpoints Privados (Proxy para Auth) ---
@@ -729,7 +714,34 @@ async def partner_inbound_transfer(
         pass_headers=[] # No pasamos ningún header del partner
     )
 
+# Agrega esto al final de gateway_service/main.py
 
+@app.get("/bank/stats", tags=["Bank Admin"])
+async def proxy_bank_stats(request: Request):
+    """Proxy para ver las ganancias del banco (Balance Service)."""
+    return await forward_request(request, f"{BALANCE_URL}/bank/stats")
+
+
+
+
+@app.get("/p2p/check/{phone_number}", tags=["P2P"])
+async def check_recipient_name(
+    phone_number: str, 
+    request: Request, 
+    user_id: int = Depends(get_current_user_id)
+):
+    """Permite al frontend validar el nombre del destinatario antes de transferir."""
+    # Reenvía la consulta al Auth Service
+    return await forward_request(request, f"{AUTH_URL}/users/by-phone/{phone_number}")
+
+
+
+@app.delete("/auth/me", tags=["Authentication"])
+async def proxy_delete_me(request: Request, user_id: int = Depends(get_current_user_id)):
+    """Elimina la cuenta del usuario actual (si no tiene deudas)."""
+    logger.info(f"Solicitud de eliminación de cuenta para user_id: {user_id}")
+    # Redirigimos al Auth Service endpoint /users/{id}
+    return await forward_request(request, f"{AUTH_URL}/users/{user_id}")
 
 
 # --- Manejador de Cierre ---
