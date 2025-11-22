@@ -262,6 +262,84 @@ def verify(token: str):
     # (El gateway_service ahora leerá 'sub' sin problemas)
     return {"sub": payload.get("sub"), "exp": payload.get("exp"), "name": payload.get("name")}
 
+@app.post("/users/{user_id}/change-password", tags=["Users"])
+def change_user_password(
+    user_id: int, 
+    req: schemas.PasswordChangeRequest, 
+    db: Session = Depends(get_db)
+):
+    """Cambia la contraseña del usuario validando la actual."""
+    logger.info(f"Intento de cambio de contraseña para user_id: {user_id}")
+    
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Usuario no encontrado")
+
+    # 1. Verificar que la contraseña actual sea correcta
+    if not verify_password(req.current_password, user.hashed_password):
+        logger.warning(f"Fallo cambio de password user {user_id}: Password actual incorrecto")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "La contraseña actual es incorrecta.")
+
+    # 2. Encriptar la nueva contraseña
+    user.hashed_password = get_password_hash(req.new_password)
+    
+    try:
+        db.commit()
+        logger.info(f"Contraseña actualizada exitosamente para user {user_id}")
+        return {"message": "Contraseña actualizada correctamente"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error DB al cambiar password: {e}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al actualizar contraseña")
+    
+
+# En auth_service/main.py (Junto a los otros endpoints de usuario)
+
+@app.delete("/users/{user_id}", tags=["Users"])
+async def delete_user(user_id: int, db: Session = Depends(get_db)):
+    """
+    Elimina el usuario del sistema.
+    Coordina con Balance Service para verificar deudas primero.
+    """
+    logger.info(f"Iniciando proceso de eliminación para usuario {user_id}")
+    
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Usuario no encontrado")
+
+    # 1. Llamar a Balance Service para verificar y borrar datos financieros
+    if not BALANCE_SERVICE_URL:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Configuración interna incompleta (Balance URL)")
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.delete(f"{BALANCE_SERVICE_URL}/accounts/{user_id}")
+            
+            # Si Balance Service dice que hay deuda (400), detenemos todo
+            if response.status_code == 400:
+                detail = response.json().get('detail', 'Deuda pendiente')
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, detail)
+                
+            response.raise_for_status() # Para otros errores (500, etc)
+            
+        except httpx.HTTPStatusError as e:
+            # Re-lanzamos el error específico si viene del microservicio
+            if e.response.status_code == 400:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, e.response.json().get('detail'))
+            logger.error(f"Error contactando Balance Service: {e}")
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "No se pudo verificar el estado financiero.")
+
+    # 2. Si llegamos aquí, no hay deuda. Procedemos a borrar el usuario.
+    try:
+        db.delete(user)
+        db.commit()
+        logger.info(f"Usuario {user_id} eliminado permanentemente.")
+        return {"message": "Cuenta eliminada exitosamente"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error DB borrando usuario: {e}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al eliminar usuario")
+
 
 
 @app.get("/users/by-phone/{phone_number}", response_model=schemas.UserResponse, tags=["Users"])

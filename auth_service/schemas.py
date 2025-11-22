@@ -43,3 +43,8 @@ class TokenPayload(BaseModel):
 
 class UserBulkRequest(BaseModel):
     user_ids: List[int]
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
+    confirm_password: str # (Opcional, para validar si quieres, pero con current y new basta)

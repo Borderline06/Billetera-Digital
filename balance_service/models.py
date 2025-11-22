@@ -58,7 +58,7 @@ class LoanStatus(str, enum.Enum):
 class Loan(Base):
     __tablename__ = "loans"
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("accounts.user_id"), nullable=False, unique=True)
+    user_id = Column(Integer, ForeignKey("accounts.user_id"), nullable=False)
     
     # NUEVO CAMPO
     dni = Column(String(8), nullable=True) 

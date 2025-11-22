@@ -722,6 +722,28 @@ async def proxy_bank_stats(request: Request):
     return await forward_request(request, f"{BALANCE_URL}/bank/stats")
 
 
+
+
+@app.get("/p2p/check/{phone_number}", tags=["P2P"])
+async def check_recipient_name(
+    phone_number: str, 
+    request: Request, 
+    user_id: int = Depends(get_current_user_id)
+):
+    """Permite al frontend validar el nombre del destinatario antes de transferir."""
+    # Reenvía la consulta al Auth Service
+    return await forward_request(request, f"{AUTH_URL}/users/by-phone/{phone_number}")
+
+
+
+@app.delete("/auth/me", tags=["Authentication"])
+async def proxy_delete_me(request: Request, user_id: int = Depends(get_current_user_id)):
+    """Elimina la cuenta del usuario actual (si no tiene deudas)."""
+    logger.info(f"Solicitud de eliminación de cuenta para user_id: {user_id}")
+    # Redirigimos al Auth Service endpoint /users/{id}
+    return await forward_request(request, f"{AUTH_URL}/users/{user_id}")
+
+
 # --- Manejador de Cierre ---
 @app.on_event("shutdown")
 async def shutdown_event():

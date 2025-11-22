@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import text
 from fastapi.responses import Response
-from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client import Gauge, Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from dotenv import load_dotenv
 
 # Importaciones locales
@@ -46,6 +46,54 @@ app = FastAPI(
 # --- Métricas Prometheus (Resumido para ahorrar espacio) ---
 REQUEST_COUNT = Counter("balance_requests_total", "Total requests", ["method", "endpoint", "status_code"])
 REQUEST_LATENCY = Histogram("balance_request_latency_seconds", "Request latency", ["endpoint"])
+
+
+# NUEVAS MÉTRICAS DE NEGOCIO (Para Grafana)
+BANK_PROFIT_GAUGE = Gauge('bank_profit_total', 'Ganancia total acumulada del banco (Intereses cobrados)')
+BANK_LOANS_GAUGE = Gauge('bank_loans_total', 'Cantidad total de préstamos otorgados')
+BANK_LENT_GAUGE = Gauge('bank_lent_total', 'Monto total de dinero prestado por el banco')
+
+def update_metrics_from_db(db: Session):
+    """Recalcula las métricas de negocio leyendo la base de datos."""
+    try:
+        # 1. Ganancias y Monto Prestado (Solo de préstamos PAGADOS o ACTIVOS según tu lógica)
+        # Para "Ganancia Real", sumamos solo los PAGADOS.
+        paid_loans = db.query(Loan).filter(Loan.status == LoanStatus.PAID).all()
+        
+        total_profit = Decimal('0.00')
+        
+        for loan in paid_loans:
+            profit = loan.principal_amount * (loan.interest_rate / 100)
+            total_profit += profit
+            
+        # 2. Total Prestado (Histórico de todos los préstamos, pagados o no)
+        all_loans = db.query(Loan).all()
+        total_lent = sum(l.principal_amount for l in all_loans)
+        total_count = len(all_loans)
+
+        # 3. Actualizar Prometheus
+        BANK_PROFIT_GAUGE.set(float(total_profit))
+        BANK_LENT_GAUGE.set(float(total_lent))
+        BANK_LOANS_GAUGE.set(float(total_count))
+        
+        logger.info(f"Métricas actualizadas: Profit={total_profit}, Loans={total_count}")
+    except Exception as e:
+        logger.error(f"Error actualizando métricas: {e}")
+
+
+@app.on_event("startup")
+def startup_event():
+    # Inicializar métricas con datos reales
+    try:
+        db = SessionLocal()
+        update_metrics_from_db(db)
+        db.close()
+        logger.info("Métricas de negocio inicializadas en Prometheus.")
+    except Exception as e:
+        logger.error(f"Error en startup metrics: {e}")
+
+
+
 
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
@@ -128,10 +176,25 @@ def create_account(account_in: schemas.AccountCreate, db: Session = Depends(get_
 
 @app.get("/balance/{user_id}", response_model=schemas.AccountResponse, tags=["BDI Balance"])
 def get_balance(user_id: int, db: Session = Depends(get_db)):
-    # Usamos joinedload para traer el préstamo activo si existe
-    account = db.query(Account).options(joinedload(Account.loan)).filter(Account.user_id == user_id).first()
+    """Obtiene saldo y busca específicamente el préstamo ACTIVO."""
+    
+    # 1. Buscamos la cuenta base
+    account = db.query(Account).filter(Account.user_id == user_id).first()
+    
     if not account:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Cuenta no encontrada.")
+
+    # 2. BÚSQUEDA MANUAL: Buscamos si tiene un préstamo ACTIVO
+    # (Ignoramos los pagados del historial)
+    active_loan = db.query(Loan).filter(
+        Loan.user_id == user_id, 
+        Loan.status == LoanStatus.ACTIVE
+    ).first()
+
+    # 3. "Pegamos" el préstamo activo a la respuesta
+    # Si active_loan es None, el front no mostrará nada. Si existe, mostrará la deuda.
+    account.loan = active_loan 
+
     return account
 
 @app.post("/balance/check", tags=["BDI Balance"])
@@ -323,7 +386,7 @@ async def request_loan(
                 }
             )
             ledger_res.raise_for_status()
-
+        update_metrics_from_db(db)
         account = db.query(Account).filter(Account.user_id == user_id).first()
         return account
 
@@ -385,7 +448,7 @@ async def pay_loan(
         loan.status = LoanStatus.PAID
         db.commit()
         db.refresh(loan)
-        
+        update_metrics_from_db(db)
         return loan
 
     except httpx.HTTPStatusError as e:
@@ -396,3 +459,46 @@ async def pay_loan(
     except Exception as e:
         logger.error(f"Error pagando préstamo: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al pagar.")
+    
+
+# En balance_service/main.py (Al final)
+
+@app.delete("/accounts/{user_id}", tags=["Internal"])
+def delete_account_internal(user_id: int, db: Session = Depends(get_db)):
+    """
+    Elimina la cuenta y datos financieros. 
+    BLOQUEA si hay deuda activa.
+    """
+    logger.info(f"Solicitud de eliminación de cuenta financiera para user_id: {user_id}")
+    
+    # 1. Verificar Deuda Activa
+    active_loan = db.query(Loan).filter(
+        Loan.user_id == user_id, 
+        Loan.status == LoanStatus.ACTIVE
+    ).first()
+    
+    if active_loan:
+        logger.warning(f"Eliminación bloqueada: El usuario {user_id} tiene deuda activa.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail=f"No puedes eliminar tu cuenta porque tienes una deuda pendiente de S/ {active_loan.outstanding_balance}."
+        )
+
+    try:
+        with db.begin():
+            # 2. Eliminar historial de préstamos (ya sabemos que son pagados)
+            db.query(Loan).filter(Loan.user_id == user_id).delete()
+            
+            # 3. Eliminar la cuenta de saldo
+            account = db.query(Account).filter(Account.user_id == user_id).first()
+            if account:
+                db.delete(account)
+            
+            db.commit()
+            logger.info(f"Datos financieros eliminados para user_id: {user_id}")
+            return {"message": "Datos financieros eliminados"}
+            
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error eliminando cuenta financiera: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al eliminar datos financieros.")
