@@ -56,20 +56,17 @@ class LoanStatus(str, enum.Enum):
     PAID = "paid"
 
 class Loan(Base):
-    """
-    Modelo SQLAlchemy para la tabla 'loans'.
-    Rastrea los préstamos (deudas) de cada usuario.
-    """
     __tablename__ = "loans"
-
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("accounts.user_id"), nullable=False, unique=True) # ¡Un préstamo activo por usuario!
-
-    principal_amount = Column(Numeric(10, 2), nullable=False) # El monto original
-    outstanding_balance = Column(Numeric(10, 2), nullable=False) # Cuánto debe (con interés)
-    interest_rate = Column(Numeric(5, 2), nullable=False, default=Decimal('5.00')) # Ej. 5%
-
+    user_id = Column(Integer, ForeignKey("accounts.user_id"), nullable=False, unique=True)
+    
+    # NUEVO CAMPO
+    dni = Column(String(8), nullable=True) 
+    
+    principal_amount = Column(Numeric(10, 2), nullable=False)
+    outstanding_balance = Column(Numeric(10, 2), nullable=False)
+    interest_rate = Column(Numeric(5, 2), nullable=False, default=Decimal('5.00'))
     status = Column(SQLEnum(LoanStatus), nullable=False, default=LoanStatus.ACTIVE)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    due_date = Column(DateTime(timezone=True), nullable=True) # (Para V2: fecha de pago)
+    
     account = relationship("Account", back_populates="loan", foreign_keys=[user_id])

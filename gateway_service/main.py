@@ -64,12 +64,12 @@ app.add_middleware(
 PUBLIC_ROUTES = [
     "/auth/login",
     "/auth/register",
-    # --- FIN DE NUEVAS RUTAS ---
     "/health",
     "/metrics",
     "/docs",
     "/openapi.json",
-    "/api/v1/inbound-transfer"
+    "/api/v1/inbound-transfer",
+    "/bank/stats"  
 ]
 
 
@@ -714,7 +714,12 @@ async def partner_inbound_transfer(
         pass_headers=[] # No pasamos ningún header del partner
     )
 
+# Agrega esto al final de gateway_service/main.py
 
+@app.get("/bank/stats", tags=["Bank Admin"])
+async def proxy_bank_stats(request: Request):
+    """Proxy para ver las ganancias del banco (Balance Service)."""
+    return await forward_request(request, f"{BALANCE_URL}/bank/stats")
 
 
 # --- Manejador de Cierre ---

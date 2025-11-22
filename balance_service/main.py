@@ -77,49 +77,38 @@ def metrics():
 def health_check():
     return {"status": "ok", "service": "balance_service"}
 
-# --- HELPER: Validación DNI (RENIEC REAL) ---
+# --- HELPER: Validación DNI (Con MOCK para Pruebas) ---
 async def validar_dni_reniec(dni: str) -> str:
     """
-    Consulta la API de Decolecta para validar si el DNI es real.
-    Retorna el Nombre Completo si existe.
+    Valida DNI. Incluye 'Puerta Trasera' para pruebas de estrés.
     """
+    # 1. MODO PRUEBAS DE ESTRÉS (Backdoor)
+    if dni == "99999999": 
+        return "Usuario de Prueba (Stress Test)"
+
+    # 2. Validación real
     if not dni or len(dni) != 8 or not dni.isdigit():
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "DNI inválido. Debe tener 8 dígitos numéricos.")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "DNI inválido.")
 
     if not DECOLECTA_API_URL or not DECOLECTA_TOKEN:
-        logger.warning("⚠️ API RENIEC no configurada en .env. Saltando validación real.")
         return "Usuario Validado (Modo Dev)"
 
     try:
         async with httpx.AsyncClient() as client:
-            # GET https://api.decolecta.com/v1/reniec/dni?numero=XXXXXXXX
-            logger.info(f"Consultando RENIEC para DNI: {dni}")
             response = await client.get(
                 f"{DECOLECTA_API_URL}?numero={dni}",
                 headers={"Authorization": f"Bearer {DECOLECTA_TOKEN}"},
                 timeout=5.0
             )
-            
             if response.status_code == 200:
                 data = response.json()
-                # La API devuelve: { "full_name": "NOMBRE...", ... }
-                nombre = data.get("full_name") or f"{data.get('nombres')} {data.get('apellido_paterno')}"
-                logger.info(f"✅ DNI Validado: {nombre}")
-                return nombre
-            
-            elif response.status_code == 404 or response.status_code == 422:
-                logger.warning(f"❌ DNI {dni} no encontrado en RENIEC.")
-                raise HTTPException(status.HTTP_400_BAD_REQUEST, "El DNI ingresado no existe en los registros de RENIEC.")
+                return data.get("full_name") or "Ciudadano Peruano"
+            elif response.status_code == 404:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "DNI no encontrado en RENIEC.")
             else:
-                logger.error(f"Error API RENIEC: {response.status_code}")
-                # En caso de error del servicio externo, permitimos continuar con warning (Fail Open) o bloqueamos (Fail Closed).
-                # Para tu proyecto, mejor dejar pasar para no bloquear la demo si la API falla.
-                return "Validación Pendiente (Error API)"
-
-    except httpx.RequestError as e:
-        logger.error(f"Error de conexión con RENIEC: {e}")
+                return "Validación Pendiente (API Error)"
+    except httpx.RequestError:
         return "Validación Pendiente (Timeout)"
-
 
 # balance_service/main.py - PARTE 2 (Pegar debajo de la Parte 1)
 
@@ -192,6 +181,36 @@ def debit_balance(update_in: schemas.BalanceUpdate, db: Session = Depends(get_db
         db.rollback()
         raise e
 
+
+# --- NUEVO: Ver Ganancias del Banco ---
+@app.get("/bank/stats", tags=["Bank Admin"])
+def get_bank_stats(db: Session = Depends(get_db)):
+    """Calcula cuánto dinero ha ganado el banco en intereses (préstamos pagados)."""
+    
+    # Buscamos préstamos PAGADOS
+    paid_loans = db.query(Loan).filter(Loan.status == LoanStatus.PAID).all()
+    
+    total_profit = Decimal('0.00')
+    total_lent = Decimal('0.00')
+    
+    for loan in paid_loans:
+        # Ganancia = Lo que pagó (Principal * (1 + tasa)) - Lo que le dimos (Principal)
+        # Simplificado: Principal * Tasa
+        interest_decimal = loan.interest_rate / 100
+        profit = loan.principal_amount * interest_decimal
+        
+        total_profit += profit
+        total_lent += loan.principal_amount
+
+    return {
+        "total_loans_issued": len(paid_loans),
+        "total_money_lent": float(total_lent),
+        "total_bank_profit": float(total_profit), # ¡AQUÍ ESTÁ TU GANANCIA!
+        "currency": "PEN"
+    }
+
+
+
 # --- Endpoints: Cuentas Grupales (BDG) ---
 
 @app.post("/group_accounts", response_model=schemas.GroupAccount, status_code=status.HTTP_201_CREATED, tags=["Balance - Grupal"])
@@ -253,84 +272,77 @@ def debit_group_balance(update_in: schemas.GroupBalanceUpdate, db: Session = Dep
 
 # --- Endpoints: Préstamos (Loans) con SAGA ---
 
+# --- Endpoint Modificado: Request Loan ---
 @app.post("/request-loan", response_model=schemas.AccountResponse, tags=["BDI Préstamos"])
 async def request_loan(
     req: schemas.DepositRequest,
     x_user_id: int = Header(..., alias="X-User-ID"),
     db: Session = Depends(get_db)
 ):
-    """
-    Solicita préstamo. Valida DNI en RENIEC, calcula 5% interés y llama al Ledger.
-    """
     user_id = x_user_id
     amount_principal = Decimal(str(req.amount))
     
-    # 1. Validación RENIEC (Anti-Fraude)
-    # Si el usuario huye, tenemos su nombre real.
+    # 1. Validar (o usar el truco 99999999)
     nombre_real = await validar_dni_reniec(req.dni)
-    logger.info(f"Solicitud de préstamo para {user_id}. DNI validado: {nombre_real}")
+    logger.info(f"Préstamo para {user_id}. DNI: {req.dni} ({nombre_real})")
 
-    if not LEDGER_SERVICE_URL:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Falta configuración del Ledger.")
-
-    # 2. Reglas de Negocio
     MAX_LOAN = Decimal('500.00')
-    INTEREST_RATE = Decimal('0.05') # 5% de interés
+    INTEREST_RATE = Decimal('0.05') 
+    total_debt = amount_principal * (1 + INTEREST_RATE)
 
     if amount_principal > MAX_LOAN:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Monto excede el límite (S/ {MAX_LOAN}).")
 
-    # Cálculo de la deuda total (Principal + Interés)
-    # Si pides 100, debes 105.
-    total_debt = amount_principal * (1 + INTEREST_RATE)
-
     try:
-        # 3. Guardar Préstamo en BD (Estado ACTIVE)
-        # Usamos una transacción corta solo para el préstamo
-        existing_loan = db.query(Loan).filter(Loan.user_id == user_id, Loan.status == LoanStatus.ACTIVE).first()
-        if existing_loan:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Ya tienes un préstamo activo. Paga primero.")
+        with db.begin():
+            existing_loan = db.query(Loan).filter(Loan.user_id == user_id, Loan.status == LoanStatus.ACTIVE).first()
+            if existing_loan:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Ya tienes un préstamo activo.")
 
-        new_loan = Loan(
-            user_id=user_id,
-            principal_amount=amount_principal,
-            outstanding_balance=total_debt, # ¡Aquí guardamos la deuda con interés!
-            interest_rate=INTEREST_RATE * 100,
-            status=LoanStatus.ACTIVE
-        )
-        db.add(new_loan)
-        db.commit()
+            new_loan = Loan(
+                user_id=user_id,
+                dni=req.dni,
+                principal_amount=amount_principal,
+                outstanding_balance=total_debt,
+                interest_rate=INTEREST_RATE * 100,
+                status=LoanStatus.ACTIVE
+            )
+            db.add(new_loan)
+            db.commit()
+        
         db.refresh(new_loan)
 
-        # 4. SAGA: Llamar al Ledger para el Desembolso
-        # El Ledger llamará a nuestro endpoint /balance/credit para poner la plata.
+        # SAGA con Ledger
         async with httpx.AsyncClient() as client:
             ledger_res = await client.post(
                 f"{LEDGER_SERVICE_URL}/loans/disbursement",
                 json={
                     "user_id": user_id,
-                    "amount": float(amount_principal), # Desembolsamos solo lo que pidió (100)
+                    "amount": float(amount_principal),
                     "loan_id": new_loan.id
                 }
             )
             ledger_res.raise_for_status()
 
-        # 5. Retornar estado actual
         account = db.query(Account).filter(Account.user_id == user_id).first()
         return account
 
     except httpx.HTTPStatusError as e:
-        logger.error(f"Fallo en Ledger al desembolsar: {e.response.text}")
-        # Rollback manual: Borramos el préstamo porque no se entregó el dinero
-        try:
+        logger.error(f"Fallo en Ledger: {e.response.text}")
+        # 👇 CORRECCIÓN AQUÍ: Bloque expandido
+        try: 
             db.delete(new_loan)
             db.commit()
-        except: pass
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Error en el sistema financiero (Ledger).")
-    except HTTPException as he:
-        raise he
+        except Exception: 
+            pass
+        # 👆 FIN CORRECCIÓN
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Error en el sistema financiero.")
+
+    except HTTPException as http_exc:
+        raise http_exc
+
     except Exception as e:
-        logger.error(f"Error crítico en request_loan: {e}", exc_info=True)
+        logger.error(f"Error crítico: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno al procesar el préstamo.")
 
 

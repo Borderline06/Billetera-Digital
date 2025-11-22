@@ -38,14 +38,13 @@ class LoanResponse(BaseModel):
 # --- FIN DE CLASE QUE FALTABA ---
 
 class AccountResponse(BaseModel):
-    """Respuesta principal para /balance/me."""
     user_id: int
     balance: Decimal
     version: int
-    active_loan: Optional[LoanResponse] = None # ¡Ahora 'LoanResponse' SÍ está definida!
+    
+    loan: Optional[LoanResponse] = None 
 
     model_config = ConfigDict(from_attributes=True)
-
 
 # --- Schemas de Cuenta Grupal (BDG) ---
 
